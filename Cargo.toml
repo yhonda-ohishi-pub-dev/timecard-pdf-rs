@@ -1,0 +1,10 @@
+[package]
+name = "timecard-pdf-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+printpdf = "0.7"
+lopdf = "0.31"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
