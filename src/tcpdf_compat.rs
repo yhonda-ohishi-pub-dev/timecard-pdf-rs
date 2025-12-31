@@ -639,6 +639,26 @@ impl TcpdfCompat {
                 layer.use_text(&timecard.driver.name, 14.0, mm(ind_x + 30.0), y_convert_text(y, 6.0, 14.0, self.page_height_mm), font);
             }
 
+            // 氏名にリンクを追加
+            let year_month_link = format!("{}-{:02}", timecard.year, timecard.month);
+            if let Some(layer) = &self.current_layer {
+                let name_x = ind_x + 30.0;
+                let name_w = 40.0;
+                let name_h = 6.0;
+                layer.add_link_annotation(printpdf::LinkAnnotation::new(
+                    printpdf::Rect::new(
+                        mm(name_x),
+                        mm(self.page_height_mm - y - name_h),
+                        mm(name_x + name_w),
+                        mm(self.page_height_mm - y),
+                    ),
+                    None,
+                    None,
+                    printpdf::Actions::uri(format!("/time-card?driver_id={}&month={}", timecard.driver.id, year_month_link)),
+                    None,
+                ));
+            }
+
             // ===== リンクボタン: TC, 集計, 出勤簿, DrV（名前の右側） =====
             let link_w = 30.0;
             let link_h = 5.0;
