@@ -15,7 +15,10 @@ use crate::tcpdf_compat::TcpdfCompat;
 /// アプリケーション状態（DBの設定情報を共有）
 #[derive(Clone)]
 pub struct AppState {
-    pub db_config: DbConfig,
+    /// 本番DB（読み取り専用）
+    pub read_db_config: DbConfig,
+    /// Docker DB（書き込み用）
+    pub write_db_config: DbConfig,
 }
 
 /// PDF生成リクエスト
@@ -35,7 +38,8 @@ pub struct ErrorResponse {
 /// HTTPサーバーを起動
 pub async fn run(port: u16) {
     let state = AppState {
-        db_config: DbConfig::production(),
+        read_db_config: DbConfig::production(),
+        write_db_config: DbConfig::docker(),
     };
 
     let cors = CorsLayer::new()
@@ -68,8 +72,8 @@ async fn generate_pdf(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PdfRequest>,
 ) -> Response {
-    // DBに接続
-    let db = match TimecardDb::connect(&state.db_config) {
+    // 読み取り用DBに接続
+    let db = match TimecardDb::connect(&state.read_db_config) {
         Ok(db) => db,
         Err(e) => {
             return (
@@ -102,6 +106,12 @@ async fn generate_pdf(
         ).into_response();
     }
 
+    // 書き込み用DBに接続してallowanceをINSERT
+    if let Ok(write_db) = TimecardDb::connect(&state.write_db_config) {
+        let _ = write_db.insert_all_timecard_allowances_to_docker(&timecards);
+        let _ = write_db.insert_kosoku_to_docker(&timecards);
+    }
+
     // PDF生成
     let mut pdf = TcpdfCompat::new(297.0, 210.0, "L");
     pdf.render_timecards(&timecards);
@@ -132,8 +142,8 @@ async fn generate_pdf_shukei(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PdfRequest>,
 ) -> Response {
-    // DBに接続
-    let db = match TimecardDb::connect(&state.db_config) {
+    // 読み取り用DBに接続
+    let db = match TimecardDb::connect(&state.read_db_config) {
         Ok(db) => db,
         Err(e) => {
             return (
@@ -166,6 +176,12 @@ async fn generate_pdf_shukei(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse { error: "No timecards found".to_string() }),
         ).into_response();
+    }
+
+    // 書き込み用DBに接続してallowanceをINSERT
+    if let Ok(write_db) = TimecardDb::connect(&state.write_db_config) {
+        let _ = write_db.insert_all_timecard_allowances_to_docker(&timecards);
+        let _ = write_db.insert_kosoku_to_docker(&timecards);
     }
 
     // PDF生成（集計モード）

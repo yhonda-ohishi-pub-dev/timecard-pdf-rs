@@ -2,3 +2,6 @@
 *.pdf
 *.json
 .env
+COVERAGE.md
+PLAN.md
+*.php

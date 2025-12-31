@@ -1,0 +1,19 @@
+services:
+  timecard-pdf:
+    image: ghcr.io/yhonda-ohishi-pub-dev/timecard-pdf-rs:latest
+    ports:
+      - "8080:8080"
+    environment:
+      # 本番DB（読み取り専用）
+      - PROD_DB_HOST=${PROD_DB_HOST}
+      - PROD_DB_PORT=${PROD_DB_PORT}
+      - PROD_DB_USER=${PROD_DB_USER}
+      - PROD_DB_PASSWORD=${PROD_DB_PASSWORD}
+      - PROD_DB_NAME=${PROD_DB_NAME}
+      # Docker DB（書き込み用）
+      - DOCKER_DB_HOST=${DOCKER_DB_HOST}
+      - DOCKER_DB_PORT=${DOCKER_DB_PORT}
+      - DOCKER_DB_USER=${DOCKER_DB_USER}
+      - DOCKER_DB_PASSWORD=${DOCKER_DB_PASSWORD}
+      - DOCKER_DB_NAME=${DOCKER_DB_NAME}
+    restart: unless-stopped
