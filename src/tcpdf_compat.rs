@@ -1,9 +1,11 @@
 use printpdf::*;
+use printpdf::path::{PaintMode, WindingOrder};
 use lopdf::{Document, Object, Dictionary, StringFormat};
 use std::fs::File;
 use std::io::{BufWriter, Cursor};
 
 use crate::coordinate_data::*;
+use crate::timecard_data::MonthlyTimecard;
 
 /// mm → Mm型
 fn mm(val: f64) -> Mm {
@@ -171,13 +173,19 @@ impl TcpdfCompat {
             Err(_) => return,
         };
 
-        // Y座標を調整（TCPDFのsetFontSizeによる隙間を補正）
-        // 整数座標に丸める（例: 10.93 → 11 → 実質10として扱う）
-        let y_adjusted = p.y.floor();
+        // Y座標を5mm単位のグリッドに揃える（セルの高さは5mm）
+        // 例: 15.93 → 15, 16.0 → 15, 16.1 → 15
+        let y_adjusted = (p.y / 5.0).floor() * 5.0;
 
         if let (Some(layer), Some(font)) = (&self.current_layer, &self.font) {
-            // テキスト描画
+            // 塗りつぶし描画（テキストや枠線より先に描画）
+            if p.fill {
+                self.draw_filled_rect(p.x, y_adjusted, p.w, p.h);
+            }
+
+            // テキスト描画（塗りつぶし後は色を黒に戻す）
             if let Some(text) = get_text_from_value(&p.text) {
+                layer.set_fill_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
                 let x = calc_text_x(p.x, p.w, &text, self.font_size, &p.align);
                 let x_mm = mm(x);
                 let y_mm = y_convert_text(y_adjusted, p.h, self.font_size, self.page_height_mm);
@@ -292,6 +300,337 @@ impl TcpdfCompat {
                 is_closed: true,
             };
             layer.add_line(rect);
+        }
+    }
+
+    fn draw_filled_rect(&self, x: f64, y: f64, w: f64, h: f64) {
+        if let Some(layer) = &self.current_layer {
+            let points = vec![
+                (Point::new(mm(x), y_convert(y, self.page_height_mm)), false),
+                (Point::new(mm(x + w), y_convert(y, self.page_height_mm)), false),
+                (Point::new(mm(x + w), y_convert(y + h, self.page_height_mm)), false),
+                (Point::new(mm(x), y_convert(y + h, self.page_height_mm)), false),
+            ];
+            let polygon = Polygon {
+                rings: vec![points],
+                mode: PaintMode::Fill,
+                winding_order: WindingOrder::NonZero,
+            };
+            layer.set_fill_color(self.fill_color.clone());
+            layer.add_polygon(polygon);
+        }
+    }
+
+    /// タイムカードデータからPDFを生成
+    /// 1ページに3人分のタイムカードを配置
+    pub fn render_timecards(&mut self, timecards: &[MonthlyTimecard]) {
+        // フォントを読み込む
+        let font_data = std::fs::read("fonts/msmincho01.ttf")
+            .expect("Failed to read font file");
+        let cursor = Cursor::new(font_data);
+        self.font = Some(
+            self.doc
+                .add_external_font(cursor)
+                .expect("Failed to add font"),
+        );
+
+        // レイアウト定数
+        const PERSON_WIDTH: f64 = 99.0;  // 1人分の幅（297mm / 3）
+        const HEADER_HEIGHT: f64 = 10.0; // ヘッダー高さ
+        const ROW_HEIGHT: f64 = 5.0;     // 行高さ
+        const TOP_MARGIN: f64 = 5.0;     // 上マージン
+
+        // カラム幅（合計 = 93mm）
+        const COL_DAY: f64 = 8.0;        // 日
+        const COL_WEEKDAY: f64 = 6.0;    // 曜
+        const COL_TIME: f64 = 11.0;      // 出勤/退社（4列 = 44mm）
+        const COL_OVERTIME: f64 = 11.0;  // 残業
+        const COL_REMARKS: f64 = 11.0;   // 備考
+        const COL_KOSOKU: f64 = 13.0;    // 拘束時間
+        const TABLE_WIDTH: f64 = COL_DAY + COL_WEEKDAY + COL_TIME * 4.0 + COL_OVERTIME + COL_REMARKS + COL_KOSOKU; // 93mm
+        const LEFT_MARGIN: f64 = PERSON_WIDTH - TABLE_WIDTH;  // 右寄せ
+
+        // 3人ずつページを作成
+        for (chunk_idx, chunk) in timecards.chunks(3).enumerate() {
+            // ページ追加
+            self.page_count += 1;
+            if self.page_count == 1 {
+                self.current_layer = self.first_page_layer.take();
+            } else {
+                let (page, layer) = self.doc.add_page(
+                    mm(self.page_width_mm),
+                    mm(self.page_height_mm),
+                    "Layer 1",
+                );
+                self.current_layer = Some(self.doc.get_page(page).get_layer(layer));
+            }
+
+            // ページを3等分する縦線を描画（PHPのmakeIniLine相当）
+            self.draw_vertical_line(PERSON_WIDTH, 0.0, self.page_height_mm);
+            self.draw_vertical_line(PERSON_WIDTH * 2.0, 0.0, self.page_height_mm);
+
+            // 各人のタイムカードを描画
+            for (person_idx, timecard) in chunk.iter().enumerate() {
+                let x_offset = person_idx as f64 * PERSON_WIDTH + LEFT_MARGIN;
+
+                // ヘッダー描画
+                self.render_timecard_header(timecard, x_offset, TOP_MARGIN, TABLE_WIDTH, HEADER_HEIGHT);
+
+                // カラムヘッダー描画
+                let col_header_y = TOP_MARGIN + HEADER_HEIGHT;
+                self.render_column_headers(x_offset, col_header_y, ROW_HEIGHT,
+                    COL_DAY, COL_WEEKDAY, COL_TIME, COL_OVERTIME, COL_REMARKS, COL_KOSOKU);
+
+                // データ行描画
+                let data_start_y = col_header_y + ROW_HEIGHT;
+                self.render_timecard_data(timecard, x_offset, data_start_y, ROW_HEIGHT,
+                    COL_DAY, COL_WEEKDAY, COL_TIME, COL_OVERTIME, COL_REMARKS, COL_KOSOKU);
+
+                // 集計部分を描画（31日分のデータの下）
+                let summary_y = data_start_y + 31.0 * ROW_HEIGHT;
+                self.render_timecard_summary(timecard, x_offset, summary_y, ROW_HEIGHT, TABLE_WIDTH);
+            }
+
+            println!("Page {} rendered ({} people)", chunk_idx + 1, chunk.len());
+        }
+    }
+
+    /// タイムカードヘッダー（氏名、年月）を描画
+    fn render_timecard_header(&self, timecard: &MonthlyTimecard, x: f64, y: f64, w: f64, h: f64) {
+        if let (Some(layer), Some(font)) = (&self.current_layer, &self.font) {
+            // 枠線
+            self.draw_rect(x, y, w, h);
+
+            // 氏名（左側）
+            let name = &timecard.driver.name;
+            layer.set_fill_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
+            let name_x = mm(x + 2.0);
+            let name_y = y_convert_text(y, h, 12.0, self.page_height_mm);
+            layer.use_text(name, 12.0, name_x, name_y, font);
+
+            // 年月（右側）
+            let year_month = timecard.year_month_str();
+            let ym_x = mm(x + w - 35.0);
+            layer.use_text(&year_month, 10.0, ym_x, name_y, font);
+        }
+    }
+
+    /// カラムヘッダーを描画
+    fn render_column_headers(&self, x: f64, y: f64, h: f64,
+        col_day: f64, col_weekday: f64, col_time: f64, col_overtime: f64, col_remarks: f64, col_kosoku: f64) {
+
+        if let (Some(layer), Some(font)) = (&self.current_layer, &self.font) {
+            layer.set_fill_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
+
+            let headers = ["日", "曜", "出勤1", "退社1", "出勤2", "退社2", "残業", "備考", "拘束"];
+            let widths = [col_day, col_weekday, col_time, col_time, col_time, col_time, col_overtime, col_remarks, col_kosoku];
+
+            let mut current_x = x;
+            for (header, width) in headers.iter().zip(widths.iter()) {
+                // 枠線
+                self.draw_rect(current_x, y, *width, h);
+
+                // テキスト（中央揃え）
+                let text_x = calc_text_x(current_x, *width, header, 10.0, "C");
+                let text_y = y_convert_text(y, h, 10.0, self.page_height_mm);
+                layer.use_text(*header, 10.0, mm(text_x), text_y, font);
+
+                current_x += width;
+            }
+        }
+    }
+
+    /// タイムカードデータ行を描画
+    fn render_timecard_data(&self, timecard: &MonthlyTimecard, x: f64, start_y: f64, row_h: f64,
+        col_day: f64, col_weekday: f64, col_time: f64, col_overtime: f64, col_remarks: f64, col_kosoku: f64) {
+
+        if let (Some(layer), Some(font)) = (&self.current_layer, &self.font) {
+            let widths = [col_day, col_weekday, col_time, col_time, col_time, col_time, col_overtime, col_remarks, col_kosoku];
+
+            for (row_idx, day) in timecard.days.iter().enumerate() {
+                let y = start_y + row_idx as f64 * row_h;
+
+                // データ配列を作成
+                let in1 = day.clock_in.get(0).map(|s| s.as_str()).unwrap_or("");
+                let out1 = day.clock_out.get(0).map(|s| s.as_str()).unwrap_or("");
+                let in2 = day.clock_in.get(1).map(|s| s.as_str()).unwrap_or("");
+                let out2 = day.clock_out.get(1).map(|s| s.as_str()).unwrap_or("");
+
+                // 備考（PHPでは畜/引マークを備考に出力していない）
+                let remarks = day.remarks.clone();
+
+                let values = [
+                    day.day.to_string(),
+                    day.weekday.clone(),
+                    in1.to_string(),
+                    out1.to_string(),
+                    in2.to_string(),
+                    out2.to_string(),
+                    day.zangyo_str(),       // 残業（旅費から取得）
+                    remarks,                // 備考
+                    day.kosoku_str(),       // 拘束時間（別列）
+                ];
+
+                // 各セルを描画
+                let mut current_x = x;
+                for (col_idx, (value, width)) in values.iter().zip(widths.iter()).enumerate() {
+                    // 曜日列（col_idx=1）で日曜日の場合はグレー背景
+                    if col_idx == 1 && day.is_sunday {
+                        self.draw_filled_rect_gray(current_x, y, *width, row_h);
+                    }
+
+                    // 拘束時間列（col_idx=8）で14時間（840分）超えの場合はグレー背景
+                    if col_idx == 8 {
+                        if let Some(minutes) = day.kosoku_minutes {
+                            if minutes > 840 {
+                                self.draw_filled_rect_gray(current_x, y, *width, row_h);
+                            }
+                        }
+                    }
+
+                    // 枠線
+                    self.draw_rect(current_x, y, *width, row_h);
+
+                    // テキスト描画 - 色を黒に設定してから描画
+                    if !value.is_empty() {
+                        layer.set_fill_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
+                        // 拘束時間列（col_idx=8）は8pt、それ以外は10pt
+                        let font_size = if col_idx == 8 { 8.0 } else { 10.0 };
+                        let text_x = calc_text_x(current_x, *width, value, font_size, "C");
+                        let text_y = y_convert_text(y, row_h, font_size, self.page_height_mm);
+                        layer.use_text(value, font_size, mm(text_x), text_y, font);
+                    }
+
+                    current_x += width;
+                }
+            }
+        }
+    }
+
+    /// 集計部分を描画
+    fn render_timecard_summary(&self, timecard: &MonthlyTimecard, x: f64, y: f64, row_h: f64, width: f64) {
+        if let (Some(layer), Some(font)) = (&self.current_layer, &self.font) {
+            layer.set_fill_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
+
+            let summary = &timecard.summary;
+
+            // 1行目: 社員番号、氏名、拘束時間合計
+            let kyuyo_id = timecard.driver.kyuyo_shain_id
+                .map(|id| id.to_string())
+                .unwrap_or_default();
+
+            // 社員番号
+            layer.use_text(&kyuyo_id, 10.0, mm(x + 2.0), y_convert_text(y, row_h, 10.0, self.page_height_mm), font);
+
+            // 氏名
+            layer.use_text(&timecard.driver.name, 10.0, mm(x + 15.0), y_convert_text(y, row_h, 10.0, self.page_height_mm), font);
+
+            // 拘束時間合計（右端）
+            let kosoku_str = summary.total_kosoku_str();
+            layer.use_text(&kosoku_str, 10.0, mm(x + width - 18.0), y_convert_text(y, row_h, 10.0, self.page_height_mm), font);
+
+            // 2行目: ヘッダー（出、休、有、欠、遅、早、特）
+            let y2 = y + row_h;
+            let col_w = 10.0;
+            let headers = ["出", "休", "有", "欠", "遅", "早", "特"];
+            for (i, header) in headers.iter().enumerate() {
+                let cell_x = x + i as f64 * col_w;
+                self.draw_rect(cell_x, y2, col_w, row_h);
+                let text_x = calc_text_x(cell_x, col_w, header, 10.0, "C");
+                layer.use_text(*header, 10.0, mm(text_x), y_convert_text(y2, row_h, 10.0, self.page_height_mm), font);
+            }
+
+            // 3行目: 値（出勤、休日、有休、欠勤、遅刻、早退、特休）
+            let y3 = y2 + row_h;
+            let values = [
+                summary.shukkin.to_string(),
+                summary.kyuka.to_string(),
+                summary.yukyu.to_string(),
+                summary.kekkin.to_string(),
+                summary.chikoku.to_string(),
+                summary.soutai.to_string(),
+                summary.tokukyu.to_string(),
+            ];
+            for (i, value) in values.iter().enumerate() {
+                let cell_x = x + i as f64 * col_w;
+                self.draw_rect(cell_x, y3, col_w, row_h);
+                let text_x = calc_text_x(cell_x, col_w, value, 10.0, "C");
+                layer.use_text(value, 10.0, mm(text_x), y_convert_text(y3, row_h, 10.0, self.page_height_mm), font);
+            }
+
+            // 4行目: ヘッダー（残業、休出、引、畜、追）
+            let y4 = y3 + row_h;
+            let headers2 = ["残業", "休出", "引", "畜", "追"];
+            let widths2 = [14.0, 10.0, 10.0, 10.0, 10.0];
+            let mut cx = x;
+            for (header, w) in headers2.iter().zip(widths2.iter()) {
+                self.draw_rect(cx, y4, *w, row_h);
+                let text_x = calc_text_x(cx, *w, header, 10.0, "C");
+                layer.use_text(*header, 10.0, mm(text_x), y_convert_text(y4, row_h, 10.0, self.page_height_mm), font);
+                cx += w;
+            }
+
+            // 5行目: 値（残業合計、休出、トレーラー、家畜、追加）
+            let y5 = y4 + row_h;
+            let zangyo_str = if summary.total_zangyo != 0.0 {
+                if summary.total_zangyo.fract() == 0.0 {
+                    format!("{}", summary.total_zangyo as i32)
+                } else {
+                    format!("{:.1}", summary.total_zangyo)
+                }
+            } else {
+                "0".to_string()
+            };
+            let values2 = [
+                zangyo_str,
+                summary.kyushutsu.to_string(),
+                summary.trailer.to_string(),
+                summary.kachiku.to_string(),
+                summary.tsuika.to_string(),
+            ];
+            let mut cx = x;
+            for (value, w) in values2.iter().zip(widths2.iter()) {
+                self.draw_rect(cx, y5, *w, row_h);
+                let text_x = calc_text_x(cx, *w, value, 10.0, "C");
+                layer.use_text(value, 10.0, mm(text_x), y_convert_text(y5, row_h, 10.0, self.page_height_mm), font);
+                cx += w;
+            }
+        }
+    }
+
+    /// 縦線を描画（ページ分割用）
+    fn draw_vertical_line(&self, x: f64, y1: f64, y2: f64) {
+        if let Some(layer) = &self.current_layer {
+            layer.set_outline_thickness(0.2);
+            let points = vec![
+                (Point::new(mm(x), y_convert(y1, self.page_height_mm)), false),
+                (Point::new(mm(x), y_convert(y2, self.page_height_mm)), false),
+            ];
+            let line = Line {
+                points,
+                is_closed: false,
+            };
+            layer.add_line(line);
+        }
+    }
+
+    /// グレーの塗りつぶし矩形を描画（日曜日用）
+    fn draw_filled_rect_gray(&self, x: f64, y: f64, w: f64, h: f64) {
+        if let Some(layer) = &self.current_layer {
+            let points = vec![
+                (Point::new(mm(x), y_convert(y, self.page_height_mm)), false),
+                (Point::new(mm(x + w), y_convert(y, self.page_height_mm)), false),
+                (Point::new(mm(x + w), y_convert(y + h, self.page_height_mm)), false),
+                (Point::new(mm(x), y_convert(y + h, self.page_height_mm)), false),
+            ];
+            let polygon = Polygon {
+                rings: vec![points],
+                mode: PaintMode::Fill,
+                winding_order: WindingOrder::NonZero,
+            };
+            // グレー (200/255 ≈ 0.78)
+            layer.set_fill_color(Color::Rgb(Rgb::new(0.78, 0.78, 0.78, None)));
+            layer.add_polygon(polygon);
         }
     }
 
