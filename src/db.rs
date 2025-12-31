@@ -2,7 +2,7 @@ use mysql::*;
 use mysql::prelude::*;
 use chrono::{NaiveDateTime, NaiveDate, Datelike, Weekday};
 use std::env;
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use crate::timecard_data::{Driver, DayRecord, MonthlyTimecard, TimecardSummary};
 
@@ -50,6 +50,54 @@ impl AllowanceData {
         self.hash(&mut hasher);
         hasher.finish()
     }
+}
+
+/// バッチ取得用の中間データ構造
+/// 複数ドライバーのデータを一括取得し、driver_id別にグループ化
+#[derive(Default)]
+struct BatchTimecardData {
+    /// 打刻データ: driver_id -> [(datetime, state)]
+    punches: HashMap<i32, Vec<(String, i32)>>,
+    /// 手動入力: driver_id -> [datetime]
+    injects: HashMap<i32, Vec<String>>,
+    /// 休暇データ: driver_id -> [(date, detail)]
+    holidays: HashMap<i32, Vec<(String, String)>>,
+    /// 拘束時間（デジタコRust）: driver_id -> {day -> minutes}
+    kosoku_digitacho: HashMap<i32, HashMap<u32, i32>>,
+    /// 拘束時間（Rust計算）: driver_id -> {day -> minutes}
+    kosoku_tcdc: HashMap<i32, HashMap<u32, i32>>,
+    /// デジタコがある日: driver_id -> {day}
+    digitacho_days: HashMap<i32, HashSet<u32>>,
+    /// 出張マーク（split_line）: driver_id -> [(start, end)]
+    split_lines: HashMap<i32, Vec<(String, String)>>,
+    /// split_lineがある旅費ID: driver_id -> {ryohi_id}
+    ryohi_ids_with_split: HashMap<i32, HashSet<String>>,
+    /// 旅費行直接: driver_id -> [(id, start, end, tekiyo, fl_show)]
+    ryohi_direct: HashMap<i32, Vec<(String, String, String, Option<String>, i32)>>,
+    /// 残業（旅費版）: driver_id -> [(date, zangyo)]
+    zangyo_ryohi: HashMap<i32, Vec<(String, f64)>>,
+    /// 残業（tc版）: driver_id -> [(date, zangyo)]
+    zangyo_tc: HashMap<i32, Vec<(String, f64)>>,
+    /// ドライバーカテゴリ: driver_id -> category_name
+    driver_categories: HashMap<i32, Option<String>>,
+    /// 休暇日リスト（家畜/トレーラー用）: driver_id -> {date}
+    kyuka_dates: HashMap<i32, HashSet<String>>,
+    /// 先月最後の運行日時: driver_id -> datetime
+    last_dtako_datetime: HashMap<i32, Option<String>>,
+    /// 当月運行期間: driver_id -> [(start, end)]
+    dtako_periods: HashMap<i32, Vec<(String, String)>>,
+    /// 家畜マーク: driver_id -> [date]
+    kachiku_dates: HashMap<i32, Vec<String>>,
+    /// 先月最後のけん引運行日時: driver_id -> datetime
+    last_trailer_dtako_datetime: HashMap<i32, Option<String>>,
+    /// けん引運行期間: driver_id -> [(start, end)]
+    trailer_dtako: HashMap<i32, Vec<(String, String)>>,
+    /// けん引マーク: driver_id -> [date]
+    trailer_detail: HashMap<i32, Vec<String>>,
+    /// 追加作業カウント: driver_id -> count
+    tsuika_counts: HashMap<i32, i32>,
+    /// 入社前/退職後日数: driver_id -> (before_hire, after_retire)
+    hire_retire: HashMap<i32, (i32, i32)>,
 }
 
 /// データベース接続設定
@@ -915,18 +963,859 @@ impl TimecardDb {
         Ok(timecards)
     }
 
-    /// 全ドライバーの月別タイムカードを取得（基礎日数付き）
+    /// 全ドライバーの月別タイムカードを取得（基礎日数付き）- バッチ版
     pub fn get_all_monthly_timecards_with_kiso(&self, year: i32, month: u32) -> Result<Vec<MonthlyTimecard>> {
         let drivers = self.get_active_drivers(year, month)?;
         let kiso_date = self.get_kiso_date(year, month)?;
-        let mut timecards = Vec::new();
 
-        for driver in &drivers {
-            let timecard = self.get_monthly_timecard_with_kiso(driver, year, month, kiso_date)?;
+        let mut all_timecards = Vec::with_capacity(drivers.len());
+
+        // 25人ずつチャンク処理
+        const BATCH_SIZE: usize = 25;
+        for chunk in drivers.chunks(BATCH_SIZE) {
+            let batch_timecards = self.get_monthly_timecards_batch(chunk, year, month, kiso_date)?;
+            all_timecards.extend(batch_timecards);
+        }
+
+        Ok(all_timecards)
+    }
+
+    /// 複数ドライバーの月別タイムカードをバッチ取得
+    fn get_monthly_timecards_batch(
+        &self,
+        drivers: &[Driver],
+        year: i32,
+        month: u32,
+        kiso_date: i32,
+    ) -> Result<Vec<MonthlyTimecard>> {
+        if drivers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // ドライバーIDリストを作成
+        let driver_ids: Vec<i32> = drivers.iter().map(|d| d.id).collect();
+        let ids_str = driver_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+
+        // バッチでデータ取得
+        let batch_data = self.fetch_batch_data(&ids_str, &driver_ids, year, month)?;
+
+        // 各ドライバーのタイムカードを組み立て
+        let mut timecards = Vec::with_capacity(drivers.len());
+        for driver in drivers {
+            let timecard = self.build_timecard_from_batch(driver, year, month, kiso_date, &batch_data)?;
             timecards.push(timecard);
         }
 
         Ok(timecards)
+    }
+
+    /// バッチデータ取得（複数ドライバー分を一括取得）
+    fn fetch_batch_data(
+        &self,
+        ids_str: &str,
+        driver_ids: &[i32],
+        year: i32,
+        month: u32,
+    ) -> Result<BatchTimecardData> {
+        let mut conn = self.pool.get_conn()?;
+        let mut data = BatchTimecardData::default();
+
+        let days_in_month = get_days_in_month(year, month);
+        let start_date = format!("{}-{:02}-01 00:00:00", year, month);
+        let end_date = format!("{}-{:02}-{:02} 23:59:59", year, month, days_in_month);
+        let start_date_only = format!("{}-{:02}-01", year, month);
+        let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+        let next_month_start = format!("{}-{:02}-01", next_year, next_month);
+
+        // 1. 打刻データ（time_card_dstate）
+        let punches: Vec<(i32, String, i32)> = conn.query_map(
+            format!(
+                "SELECT id, DATE_FORMAT(datetime, '%Y-%m-%d %H:%i:%s'), state
+                 FROM time_card_dstate
+                 WHERE id IN ({})
+                 AND datetime BETWEEN '{}' AND '{}'
+                 ORDER BY id, datetime",
+                ids_str, start_date, end_date
+            ),
+            |(driver_id, datetime, state): (i32, String, i32)| (driver_id, datetime, state)
+        )?;
+        for (driver_id, datetime, state) in punches {
+            data.punches.entry(driver_id).or_default().push((datetime, state));
+        }
+
+        // 2. 手動入力データ（time_card_inject）
+        let injects: Vec<(i32, String)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DATE_FORMAT(datetime, '%Y-%m-%d %H:%i:%s')
+                 FROM time_card_inject
+                 WHERE driver_id IN ({})
+                 AND datetime BETWEEN '{}' AND '{}'
+                 ORDER BY driver_id, datetime",
+                ids_str, start_date, end_date
+            ),
+            |(driver_id, datetime): (i32, String)| (driver_id, datetime)
+        )?;
+        for (driver_id, datetime) in injects {
+            data.injects.entry(driver_id).or_default().push(datetime);
+        }
+
+        // 3. 休暇データ（daily_report_other_detail）
+        let holidays: Vec<(i32, String, String)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DATE_FORMAT(act_date, '%Y-%m-%d'), detail
+                 FROM daily_report_other_detail
+                 WHERE driver_id IN ({})
+                 AND act_date >= '{}'
+                 AND act_date < '{}'
+                 ORDER BY driver_id, act_date",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, act_date, detail): (i32, String, String)| (driver_id, act_date, detail)
+        )?;
+        for (driver_id, act_date, detail) in holidays {
+            data.holidays.entry(driver_id).or_default().push((act_date, detail));
+        }
+
+        // 4. デジタコデータがある日（本番DBのtime_card_kosoku）
+        let digitacho_days: Vec<(i32, u32)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DAY(date)
+                 FROM time_card_kosoku
+                 WHERE driver_id IN ({})
+                 AND date >= '{}'
+                 AND date < '{}'
+                 AND type = 'デジタコ'",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, day): (i32, u32)| (driver_id, day)
+        )?;
+        for (driver_id, day) in digitacho_days {
+            data.digitacho_days.entry(driver_id).or_default().insert(day);
+        }
+
+        // 5. 出張マーク（ryohi_row_split_line）
+        let split_lines: Vec<(i32, String, String)> = conn.query_map(
+            format!(
+                "SELECT rr.driver_id, DATE_FORMAT(rsl.start_datetime, '%Y-%m-%d'),
+                        DATE_FORMAT(rsl.end_datetime, '%Y-%m-%d')
+                 FROM ryohi_row_split_line rsl
+                 INNER JOIN ryohi_rows rr ON rr.id = rsl.ryohi_row_id
+                 WHERE rr.driver_id IN ({})
+                 AND (
+                     (rsl.start_datetime >= '{}' AND rsl.start_datetime < '{}')
+                     OR (rsl.end_datetime >= '{}' AND rsl.end_datetime < '{}')
+                 )",
+                ids_str, start_date_only, next_month_start, start_date_only, next_month_start
+            ),
+            |(driver_id, start_dt, end_dt): (i32, String, String)| (driver_id, start_dt, end_dt)
+        )?;
+        for (driver_id, start_dt, end_dt) in split_lines {
+            data.split_lines.entry(driver_id).or_default().push((start_dt, end_dt));
+        }
+
+        // 6. split_lineがある旅費ID
+        let ryohi_with_split: Vec<(i32, String)> = conn.query_map(
+            format!(
+                "SELECT DISTINCT rr.driver_id, rr.id
+                 FROM ryohi_rows rr
+                 INNER JOIN ryohi_row_split_line rsl ON rsl.ryohi_row_id = rr.id
+                 WHERE rr.driver_id IN ({})",
+                ids_str
+            ),
+            |(driver_id, id): (i32, String)| (driver_id, id)
+        )?;
+        for (driver_id, id) in ryohi_with_split {
+            data.ryohi_ids_with_split.entry(driver_id).or_default().insert(id);
+        }
+
+        // 7. 旅費行直接（split_lineがないものも含む）
+        let ryohi_direct: Vec<(i32, String, String, String, Option<String>, i32)> = conn.query_map(
+            format!(
+                "SELECT rr.driver_id, rr.id, DATE_FORMAT(rr.開始日時, '%Y-%m-%d'),
+                        DATE_FORMAT(rr.終了日時, '%Y-%m-%d'), rr.適用, rr.fl_show
+                 FROM ryohi_rows rr
+                 WHERE rr.driver_id IN ({})
+                 AND rr.開始日時 IS NOT NULL
+                 AND (
+                     (rr.開始日時 >= '{}' AND rr.開始日時 < '{}')
+                     OR (rr.終了日時 >= '{}' AND rr.終了日時 < '{}')
+                 )",
+                ids_str, start_date_only, next_month_start, start_date_only, next_month_start
+            ),
+            |(driver_id, id, start_dt, end_dt, tekiyo, fl_show): (i32, String, String, String, Option<String>, i32)| {
+                (driver_id, id, start_dt, end_dt, tekiyo, fl_show)
+            }
+        )?;
+        for (driver_id, id, start_dt, end_dt, tekiyo, fl_show) in ryohi_direct {
+            data.ryohi_direct.entry(driver_id).or_default().push((id, start_dt, end_dt, tekiyo, fl_show));
+        }
+
+        // 8. 残業データ（ryohi_rows）
+        let zangyo_ryohi: Vec<(i32, String, f64)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DATE_FORMAT(残業適用日, '%Y-%m-%d'), 残業
+                 FROM ryohi_rows
+                 WHERE driver_id IN ({})
+                 AND (適用 IS NULL OR 適用 != '除外')
+                 AND 残業適用日 >= '{}'
+                 AND 残業適用日 < '{}'
+                 AND 残業 <> 0",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, date, zangyo): (i32, String, f64)| (driver_id, date, zangyo)
+        )?;
+        for (driver_id, date, zangyo) in zangyo_ryohi {
+            data.zangyo_ryohi.entry(driver_id).or_default().push((date, zangyo));
+        }
+
+        // 9. 残業データ（time_card_zangyo）
+        let zangyo_tc: Vec<(i32, String, f64)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DATE_FORMAT(shori_date, '%Y-%m-%d'), zangyo
+                 FROM time_card_zangyo
+                 WHERE driver_id IN ({})
+                 AND shori_date >= '{}'
+                 AND shori_date < '{}'
+                 AND zangyo <> 0",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, date, zangyo): (i32, String, f64)| (driver_id, date, zangyo)
+        )?;
+        for (driver_id, date, zangyo) in zangyo_tc {
+            data.zangyo_tc.entry(driver_id).or_default().push((date, zangyo));
+        }
+
+        // 10. ドライバーカテゴリ
+        let categories: Vec<(i32, String)> = conn.query_map(
+            format!(
+                "SELECT dc.driver_id, dcn.name
+                 FROM driver_category dc
+                 JOIN driver_category_name dcn ON dc.category_c = dcn.id
+                 WHERE dc.driver_id IN ({})
+                 AND (dc.end_date IS NULL OR dc.end_date > '{}')",
+                ids_str, start_date_only
+            ),
+            |(driver_id, name): (i32, String)| (driver_id, name)
+        )?;
+        for (driver_id, name) in categories {
+            data.driver_categories.insert(driver_id, Some(name));
+        }
+
+        // 11. 休暇日リスト（家畜/トレーラー用）
+        let kyuka: Vec<(i32, String)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DATE_FORMAT(act_date, '%Y-%m-%d')
+                 FROM daily_report_other_detail
+                 WHERE driver_id IN ({})
+                 AND act_date >= '{}'
+                 AND act_date < '{}'
+                 AND detail IN ('公休', '有休', '泊休')",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, date): (i32, String)| (driver_id, date)
+        )?;
+        for (driver_id, date) in kyuka {
+            data.kyuka_dates.entry(driver_id).or_default().insert(date);
+        }
+
+        // 12. 先月最後の運行日時（Window関数使用）
+        let last_dtako: Vec<(i32, String)> = conn.query_map(
+            format!(
+                "SELECT 対象乗務員CD, DATE_FORMAT(出庫日時, '%Y-%m-%d %H:%i:%s')
+                 FROM (
+                     SELECT dr.対象乗務員CD, dr.出庫日時,
+                            ROW_NUMBER() OVER (PARTITION BY dr.対象乗務員CD ORDER BY dr.出庫日時 DESC) as rn
+                     FROM dtako_rows dr
+                     LEFT JOIN ryohi_rows rr ON rr.運行NO = CONCAT(dr.運行NO, dr.対象乗務員区分) AND rr.適用 = '除外'
+                     WHERE dr.対象乗務員CD IN ({})
+                     AND dr.出庫日時 < '{}'
+                     AND rr.id IS NULL
+                 ) sub
+                 WHERE rn = 1",
+                ids_str, start_date_only
+            ),
+            |(driver_id, datetime): (i32, String)| (driver_id, datetime)
+        )?;
+        for (driver_id, datetime) in last_dtako {
+            data.last_dtako_datetime.insert(driver_id, Some(datetime));
+        }
+
+        // 先月分がないドライバーは今月最初のdtako_rowを取得
+        let missing_drivers: Vec<i32> = driver_ids.iter()
+            .filter(|id| !data.last_dtako_datetime.contains_key(id))
+            .cloned()
+            .collect();
+        if !missing_drivers.is_empty() {
+            let missing_ids_str = missing_drivers.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+            let first_dtako: Vec<(i32, String)> = conn.query_map(
+                format!(
+                    "SELECT 対象乗務員CD, DATE_FORMAT(出庫日時, '%Y-%m-%d %H:%i:%s')
+                     FROM (
+                         SELECT dr.対象乗務員CD, dr.出庫日時,
+                                ROW_NUMBER() OVER (PARTITION BY dr.対象乗務員CD ORDER BY dr.出庫日時 ASC) as rn
+                         FROM dtako_rows dr
+                         LEFT JOIN ryohi_rows rr ON rr.運行NO = CONCAT(dr.運行NO, dr.対象乗務員区分) AND rr.適用 = '除外'
+                         WHERE dr.対象乗務員CD IN ({})
+                         AND dr.出庫日時 >= '{}'
+                         AND rr.id IS NULL
+                     ) sub
+                     WHERE rn = 1",
+                    missing_ids_str, start_date_only
+                ),
+                |(driver_id, datetime): (i32, String)| (driver_id, datetime)
+            )?;
+            for (driver_id, datetime) in first_dtako {
+                data.last_dtako_datetime.insert(driver_id, Some(datetime));
+            }
+        }
+
+        // 13. 当月運行期間（last_dtako_datetime以降）
+        // 各ドライバーごとに異なるlast_datetimeを使うため、まとめて全期間取得してRust側でフィルタ
+        let all_dtako_periods: Vec<(i32, String, String, String)> = conn.query_map(
+            format!(
+                "SELECT dr.対象乗務員CD, DATE_FORMAT(dr.出庫日時, '%Y-%m-%d %H:%i:%s'),
+                        DATE_FORMAT(dr.出庫日時, '%Y-%m-%d'), DATE_FORMAT(dr.帰庫日時, '%Y-%m-%d')
+                 FROM dtako_rows dr
+                 LEFT JOIN ryohi_rows rr ON rr.運行NO = CONCAT(dr.運行NO, dr.対象乗務員区分) AND rr.適用 = '除外'
+                 WHERE dr.対象乗務員CD IN ({})
+                 AND dr.出庫日時 >= '{}'
+                 AND rr.id IS NULL",
+                ids_str, format!("{}-{:02}-01", if month == 1 { year - 1 } else { year }, if month == 1 { 12 } else { month - 1 })
+            ),
+            |(driver_id, datetime, start, end): (i32, String, String, String)| (driver_id, datetime, start, end)
+        )?;
+        for (driver_id, datetime, start, end) in all_dtako_periods {
+            if let Some(Some(ref last_dt)) = data.last_dtako_datetime.get(&driver_id) {
+                if datetime >= *last_dt {
+                    data.dtako_periods.entry(driver_id).or_default().push((start, end));
+                }
+            }
+        }
+
+        // 14. 家畜マーク
+        let kachiku: Vec<(i32, String)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DATE_FORMAT(act_date, '%Y-%m-%d')
+                 FROM daily_report_other_detail
+                 WHERE driver_id IN ({})
+                 AND act_date >= '{}'
+                 AND act_date < '{}'
+                 AND detail = '家畜'",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, date): (i32, String)| (driver_id, date)
+        )?;
+        for (driver_id, date) in kachiku {
+            data.kachiku_dates.entry(driver_id).or_default().push(date);
+        }
+
+        // 15. 先月最後のけん引運行（任意の運行）- 上記のlast_dtako_datetimeを流用
+
+        // 16. 今月最初のけん引運行（けん引のないドライバー用）
+        let missing_trailer_drivers: Vec<i32> = driver_ids.iter()
+            .filter(|id| !data.last_dtako_datetime.contains_key(id))
+            .cloned()
+            .collect();
+        if !missing_trailer_drivers.is_empty() {
+            let missing_ids_str = missing_trailer_drivers.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+            let first_trailer: Vec<(i32, String)> = conn.query_map(
+                format!(
+                    "SELECT 対象乗務員CD, DATE_FORMAT(出庫日時, '%Y-%m-%d %H:%i:%s')
+                     FROM (
+                         SELECT dr.対象乗務員CD, dr.出庫日時,
+                                ROW_NUMBER() OVER (PARTITION BY dr.対象乗務員CD ORDER BY dr.出庫日時 ASC) as rn
+                         FROM dtako_rows dr
+                         INNER JOIN cars c ON c.id = dr.車輌CC
+                         INNER JOIN ryohi_sharyo_bunrui_rows rsbr ON rsbr.車輌R = c.name_R
+                         LEFT JOIN ryohi_rows rr ON rr.運行NO = CONCAT(dr.運行NO, dr.対象乗務員区分) AND rr.適用 = '除外'
+                         WHERE dr.対象乗務員CD IN ({})
+                         AND dr.出庫日時 >= '{}'
+                         AND rsbr.旅費分類 = 'けん引'
+                         AND rr.id IS NULL
+                     ) sub
+                     WHERE rn = 1",
+                    missing_ids_str, start_date_only
+                ),
+                |(driver_id, datetime): (i32, String)| (driver_id, datetime)
+            )?;
+            for (driver_id, datetime) in first_trailer {
+                data.last_trailer_dtako_datetime.insert(driver_id, Some(datetime));
+            }
+        }
+        // 先月の運行がある場合はそれを使用
+        for driver_id in driver_ids {
+            if !data.last_trailer_dtako_datetime.contains_key(driver_id) {
+                if let Some(dt) = data.last_dtako_datetime.get(driver_id) {
+                    data.last_trailer_dtako_datetime.insert(*driver_id, dt.clone());
+                }
+            }
+        }
+
+        // 17. けん引運行期間
+        let trailer_periods: Vec<(i32, String, String, String)> = conn.query_map(
+            format!(
+                "SELECT dr.対象乗務員CD, DATE_FORMAT(dr.出庫日時, '%Y-%m-%d %H:%i:%s'),
+                        DATE_FORMAT(dr.出庫日時, '%Y-%m-%d'), DATE_FORMAT(dr.帰庫日時, '%Y-%m-%d')
+                 FROM dtako_rows dr
+                 INNER JOIN cars c ON c.id = dr.車輌CC
+                 INNER JOIN ryohi_sharyo_bunrui_rows rsbr ON rsbr.車輌R = c.name_R
+                 LEFT JOIN ryohi_rows rr ON rr.運行NO = CONCAT(dr.運行NO, dr.対象乗務員区分) AND rr.適用 = '除外'
+                 WHERE dr.対象乗務員CD IN ({})
+                 AND dr.出庫日時 >= '{}'
+                 AND rsbr.旅費分類 = 'けん引'
+                 AND rr.id IS NULL",
+                ids_str, format!("{}-{:02}-01", if month == 1 { year - 1 } else { year }, if month == 1 { 12 } else { month - 1 })
+            ),
+            |(driver_id, datetime, start, end): (i32, String, String, String)| (driver_id, datetime, start, end)
+        )?;
+        for (driver_id, datetime, start, end) in trailer_periods {
+            if let Some(Some(ref last_dt)) = data.last_trailer_dtako_datetime.get(&driver_id) {
+                if datetime >= *last_dt {
+                    data.trailer_dtako.entry(driver_id).or_default().push((start, end));
+                }
+            }
+        }
+
+        // 18. けん引マーク
+        let trailer_detail: Vec<(i32, String)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DATE_FORMAT(act_date, '%Y-%m-%d')
+                 FROM daily_report_other_detail
+                 WHERE driver_id IN ({})
+                 AND act_date >= '{}'
+                 AND act_date < '{}'
+                 AND detail = 'けん引'",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, date): (i32, String)| (driver_id, date)
+        )?;
+        for (driver_id, date) in trailer_detail {
+            data.trailer_detail.entry(driver_id).or_default().push(date);
+        }
+
+        // 19. 追加作業カウント
+        let tsuika: Vec<(i32, i64)> = conn.query_map(
+            format!(
+                "SELECT driver_id, COUNT(*)
+                 FROM ryohi_ichiban_rows
+                 WHERE driver_id IN ({})
+                 AND type = '追加作業'
+                 AND end_date >= '{}'
+                 AND end_date < '{}'
+                 GROUP BY driver_id",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, count): (i32, i64)| (driver_id, count)
+        )?;
+        for (driver_id, count) in tsuika {
+            data.tsuika_counts.insert(driver_id, count as i32);
+        }
+
+        // 20. 入社日/退職日（kyuyo_shain.driver_idで結合）
+        let hire_retire: Vec<(i32, Option<String>, Option<String>)> = conn.query_map(
+            format!(
+                "SELECT ks.driver_id, DATE_FORMAT(ks.hire_date, '%Y-%m-%d'), DATE_FORMAT(ks.retire_date, '%Y-%m-%d')
+                 FROM kyuyo_shain ks
+                 WHERE ks.driver_id IN ({})
+                 AND (ks.retire_date IS NULL OR ks.retire_date > '{}')",
+                ids_str, start_date_only
+            ),
+            |(driver_id, hire_date, retire_date): (i32, Option<String>, Option<String>)| {
+                (driver_id, hire_date, retire_date)
+            }
+        )?;
+        let first_of_month = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        let end_of_month = get_end_of_month(year, month);
+        for (driver_id, hire_date, retire_date) in hire_retire {
+            let before_hire = if let Some(ref hd) = hire_date {
+                if let Ok(hire) = NaiveDate::parse_from_str(hd, "%Y-%m-%d") {
+                    if hire > first_of_month {
+                        (hire - first_of_month).num_days() as i32
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            let after_retire = if let Some(ref rd) = retire_date {
+                if let Ok(retire) = NaiveDate::parse_from_str(rd, "%Y-%m-%d") {
+                    if retire <= end_of_month {
+                        (end_of_month - retire).num_days() as i32
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            data.hire_retire.insert(driver_id, (before_hire, after_retire));
+        }
+
+        // Docker DBから拘束時間を取得
+        self.fetch_batch_docker_kosoku(&mut data, ids_str, year, month)?;
+
+        Ok(data)
+    }
+
+    /// Docker DBから拘束時間データをバッチ取得
+    fn fetch_batch_docker_kosoku(
+        &self,
+        data: &mut BatchTimecardData,
+        ids_str: &str,
+        year: i32,
+        month: u32,
+    ) -> Result<()> {
+        let docker_config = DbConfig::docker();
+        let docker_pool = Pool::new(Opts::from_url(&docker_config.connection_url())?)?;
+        let mut docker_conn = docker_pool.get_conn()?;
+
+        let start_date_only = format!("{}-{:02}-01", year, month);
+        let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+        let next_month_start = format!("{}-{:02}-01", next_year, next_month);
+
+        // デジタコRust
+        let kosoku_digitacho: Vec<(i32, u32, i32)> = docker_conn.query_map(
+            format!(
+                "SELECT driver_id, DAY(date), minutes
+                 FROM time_card_kosoku
+                 WHERE driver_id IN ({})
+                 AND date >= '{}'
+                 AND date < '{}'
+                 AND type = 'デジタコRust'",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, day, minutes): (i32, u32, i32)| (driver_id, day, minutes)
+        )?;
+        for (driver_id, day, minutes) in kosoku_digitacho {
+            data.kosoku_digitacho.entry(driver_id).or_default().insert(day, minutes);
+        }
+
+        // Rust計算
+        let kosoku_tcdc: Vec<(i32, u32, i32)> = docker_conn.query_map(
+            format!(
+                "SELECT driver_id, DAY(date), minutes
+                 FROM time_card_kosoku
+                 WHERE driver_id IN ({})
+                 AND date >= '{}'
+                 AND date < '{}'
+                 AND type = 'Rust計算'",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, day, minutes): (i32, u32, i32)| (driver_id, day, minutes)
+        )?;
+        for (driver_id, day, minutes) in kosoku_tcdc {
+            data.kosoku_tcdc.entry(driver_id).or_default().insert(day, minutes);
+        }
+
+        Ok(())
+    }
+
+    /// バッチデータから1人分のタイムカードを組み立て
+    fn build_timecard_from_batch(
+        &self,
+        driver: &Driver,
+        year: i32,
+        month: u32,
+        kiso_date: i32,
+        batch_data: &BatchTimecardData,
+    ) -> Result<MonthlyTimecard> {
+        let days_in_month = get_days_in_month(year, month);
+
+        // 各日のレコードを初期化
+        let mut days: Vec<DayRecord> = (1..=days_in_month)
+            .map(|day| {
+                let date = NaiveDate::from_ymd_opt(year, month, day as u32).unwrap();
+                let weekday = weekday_to_japanese(date.weekday());
+                DayRecord::new(day, &weekday)
+            })
+            .collect();
+
+        // 打刻データを日毎に振り分け
+        if let Some(punches) = batch_data.punches.get(&driver.id) {
+            for (datetime_str, state) in punches {
+                if let Ok(datetime) = NaiveDateTime::parse_from_str(datetime_str, "%Y-%m-%d %H:%M:%S") {
+                    let day = datetime.day() as usize;
+                    if day >= 1 && day <= days.len() {
+                        let time_str = datetime.format("%H:%M").to_string();
+                        let record = &mut days[day - 1];
+                        match *state {
+                            30 => { // 始業
+                                if record.clock_in.len() < 2 {
+                                    record.clock_in.push(time_str);
+                                }
+                            }
+                            31 => { // 終業
+                                if record.clock_out.len() < 2 {
+                                    record.clock_out.push(time_str);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // 手動入力データを日毎に振り分け
+        if let Some(injects) = batch_data.injects.get(&driver.id) {
+            for datetime_str in injects {
+                if let Ok(datetime) = NaiveDateTime::parse_from_str(datetime_str, "%Y-%m-%d %H:%M:%S") {
+                    let day = datetime.day() as usize;
+                    if day >= 1 && day <= days.len() {
+                        let time_str = datetime.format("%H:%M").to_string();
+                        let record = &mut days[day - 1];
+                        if record.clock_in.len() <= record.clock_out.len() && record.clock_in.len() < 2 {
+                            record.clock_in.push(time_str);
+                        } else if record.clock_out.len() < 2 {
+                            record.clock_out.push(time_str);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 休暇データを備考に設定
+        if let Some(holidays) = batch_data.holidays.get(&driver.id) {
+            for (date_str, detail) in holidays {
+                if let Ok(act_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    let day = act_date.day() as usize;
+                    if day >= 1 && day <= days.len() {
+                        days[day - 1].remarks = detail.clone();
+                    }
+                }
+            }
+        }
+
+        // 拘束時間を設定（デジタコRust優先）
+        if let Some(kosoku_tcdc) = batch_data.kosoku_tcdc.get(&driver.id) {
+            for (&day, &minutes) in kosoku_tcdc {
+                if day >= 1 && day <= days.len() as u32 {
+                    days[day as usize - 1].kosoku_minutes = Some(minutes);
+                }
+            }
+        }
+        if let Some(kosoku_digitacho) = batch_data.kosoku_digitacho.get(&driver.id) {
+            for (&day, &minutes) in kosoku_digitacho {
+                if day >= 1 && day <= days.len() as u32 {
+                    days[day as usize - 1].kosoku_minutes = Some(minutes);
+                }
+            }
+        }
+
+        // デジタコフラグを設定
+        if let Some(digitacho_days) = batch_data.digitacho_days.get(&driver.id) {
+            for &day in digitacho_days {
+                if day >= 1 && day <= days.len() as u32 {
+                    days[day as usize - 1].has_digitacho = true;
+                }
+            }
+        }
+
+        // 月の開始・終了
+        let start_month_parsed = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        let end_month_parsed = if month == 12 {
+            NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+        } else {
+            NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+        };
+
+        // 「出」マークを設定（split_lineから）
+        if let Some(split_lines) = batch_data.split_lines.get(&driver.id) {
+            for (start_str, end_str) in split_lines {
+                if let (Ok(start_date), Ok(end_date)) = (
+                    NaiveDate::parse_from_str(start_str, "%Y-%m-%d"),
+                    NaiveDate::parse_from_str(end_str, "%Y-%m-%d")
+                ) {
+                    if end_date > start_date {
+                        let mut current = start_date;
+                        while current <= end_date {
+                            if current >= start_month_parsed && current < end_month_parsed {
+                                let day = current.day() as usize;
+                                if day >= 1 && day <= days.len() && days[day - 1].remarks.is_empty() {
+                                    days[day - 1].remarks = "出".to_string();
+                                }
+                            }
+                            current = current.succ_opt().unwrap();
+                        }
+                    }
+                }
+            }
+        }
+
+        // 「出」マーク（ryohi_rows直接）
+        if let Some(ryohi_direct) = batch_data.ryohi_direct.get(&driver.id) {
+            let ryohi_ids_with_split = batch_data.ryohi_ids_with_split.get(&driver.id);
+            for (id, start_str, end_str, tekiyo, fl_show) in ryohi_direct {
+                // split_lineがあるものはスキップ
+                if let Some(ids) = ryohi_ids_with_split {
+                    if ids.contains(id) {
+                        continue;
+                    }
+                }
+                if tekiyo.as_deref() == Some("北海道残業") || *fl_show == 0 {
+                    continue;
+                }
+                if let (Ok(start_date), Ok(end_date)) = (
+                    NaiveDate::parse_from_str(start_str, "%Y-%m-%d"),
+                    NaiveDate::parse_from_str(end_str, "%Y-%m-%d")
+                ) {
+                    if end_date > start_date {
+                        let mut current = start_date;
+                        while current <= end_date {
+                            if current >= start_month_parsed && current < end_month_parsed {
+                                let day = current.day() as usize;
+                                if day >= 1 && day <= days.len() && days[day - 1].remarks.is_empty() {
+                                    days[day - 1].remarks = "出".to_string();
+                                }
+                            }
+                            current = current.succ_opt().unwrap();
+                        }
+                    }
+                }
+            }
+        }
+
+        // 残業を設定
+        if let Some(zangyo_ryohi) = batch_data.zangyo_ryohi.get(&driver.id) {
+            for (date_str, zangyo) in zangyo_ryohi {
+                if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    let day = date.day() as usize;
+                    if day >= 1 && day <= days.len() {
+                        let current = days[day - 1].zangyo.unwrap_or(0.0);
+                        days[day - 1].zangyo = Some(current + zangyo);
+                    }
+                }
+            }
+        }
+        if let Some(zangyo_tc) = batch_data.zangyo_tc.get(&driver.id) {
+            for (date_str, zangyo) in zangyo_tc {
+                if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    let day = date.day() as usize;
+                    if day >= 1 && day <= days.len() {
+                        let current = days[day - 1].zangyo.unwrap_or(0.0);
+                        days[day - 1].zangyo = Some(current + zangyo);
+                    }
+                }
+            }
+        }
+
+        // ドライバーカテゴリに基づくマーク
+        let driver_category = batch_data.driver_categories.get(&driver.id).cloned().flatten();
+        if let Some(ref cat_name) = driver_category {
+            if cat_name == "家畜車" || cat_name == "トレーラー" {
+                let kyuka_set = batch_data.kyuka_dates.get(&driver.id);
+                if let Some(dtako_periods) = batch_data.dtako_periods.get(&driver.id) {
+                    for (start_str, end_str) in dtako_periods {
+                        if let (Ok(start_date), Ok(end_date)) = (
+                            NaiveDate::parse_from_str(start_str, "%Y-%m-%d"),
+                            NaiveDate::parse_from_str(end_str, "%Y-%m-%d")
+                        ) {
+                            let mut current = start_date;
+                            while current <= end_date {
+                                if current >= start_month_parsed && current < end_month_parsed {
+                                    let date_key = current.format("%Y-%m-%d").to_string();
+                                    let is_kyuka = kyuka_set.map(|s| s.contains(&date_key)).unwrap_or(false);
+                                    if !is_kyuka {
+                                        let day = current.day() as usize;
+                                        if day >= 1 && day <= days.len() {
+                                            if cat_name == "家畜車" {
+                                                days[day - 1].is_kachiku = true;
+                                            } else if cat_name == "トレーラー" {
+                                                days[day - 1].is_trailer = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                current = current.succ_opt().unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 家畜マーク追加
+        if let Some(kachiku_dates) = batch_data.kachiku_dates.get(&driver.id) {
+            for date_str in kachiku_dates {
+                if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    let day = date.day() as usize;
+                    if day >= 1 && day <= days.len() {
+                        days[day - 1].is_kachiku = true;
+                    }
+                }
+            }
+        }
+
+        // トレーラーマーク追加（けん引運行から）
+        let kyuka_set_trailer = batch_data.kyuka_dates.get(&driver.id);
+        if let Some(trailer_dtako) = batch_data.trailer_dtako.get(&driver.id) {
+            for (start_str, end_str) in trailer_dtako {
+                if let (Ok(start_date), Ok(end_date)) = (
+                    NaiveDate::parse_from_str(start_str, "%Y-%m-%d"),
+                    NaiveDate::parse_from_str(end_str, "%Y-%m-%d")
+                ) {
+                    let mut current = start_date;
+                    while current <= end_date {
+                        if current >= start_month_parsed && current < end_month_parsed {
+                            let date_key = current.format("%Y-%m-%d").to_string();
+                            let is_kyuka = kyuka_set_trailer.map(|s| s.contains(&date_key)).unwrap_or(false);
+                            if !is_kyuka {
+                                let day = current.day() as usize;
+                                if day >= 1 && day <= days.len() {
+                                    days[day - 1].is_trailer = true;
+                                }
+                            }
+                        }
+                        current = current.succ_opt().unwrap();
+                    }
+                }
+            }
+        }
+
+        // けん引マーク追加
+        if let Some(trailer_detail) = batch_data.trailer_detail.get(&driver.id) {
+            for date_str in trailer_detail {
+                if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    let day = date.day() as usize;
+                    if day >= 1 && day <= days.len() {
+                        days[day - 1].is_trailer = true;
+                    }
+                }
+            }
+        }
+
+        // 手当データ集計
+        let mut summary = TimecardSummary::default();
+        for day in &days {
+            if day.is_kachiku {
+                summary.kachiku += 1;
+            }
+            if day.is_trailer {
+                summary.trailer += 1;
+            }
+        }
+
+        // 追加作業
+        summary.tsuika = batch_data.tsuika_counts.get(&driver.id).cloned().unwrap_or(0);
+
+        let mut timecard = MonthlyTimecard {
+            driver: driver.clone(),
+            year,
+            month,
+            days,
+            summary,
+        };
+
+        // 基礎日数を使って再計算
+        let (before_hire, after_retire) = batch_data.hire_retire.get(&driver.id).cloned().unwrap_or((0, 0));
+        timecard.calculate_summary_with_kiso(kiso_date, before_hire, after_retire);
+
+        Ok(timecard)
     }
 
     /// 打刻データから拘束時間を計算（PHPの_make_tc_to_tcと同等のロジック）
