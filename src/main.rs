@@ -187,14 +187,15 @@ fn run_pdf_mode(args: &[String]) {
     println!("取得したタイムカード数: {}", timecards.len());
     println!();
 
-    // time_card_allowanceテーブルにINSERT（Docker DB）
-    println!("time_card_allowance（Docker DB）にINSERT...");
-    match db.insert_all_timecard_allowances_to_docker(&timecards) {
-        Ok(count) => {
-            println!("[OK] {}件INSERT完了", count);
+    // time_card_allowanceテーブルを差分更新（Docker DB）
+    println!("time_card_allowance（Docker DB）を差分更新...");
+    match db.sync_all_timecard_allowances_to_docker(&timecards) {
+        Ok((inserted, updated, unchanged)) => {
+            println!("[OK] 追加: {}, 更新: {}, 変更なし: {}",
+                     inserted, updated, unchanged);
         }
         Err(e) => {
-            eprintln!("[ERROR] INSERT失敗: {}", e);
+            eprintln!("[ERROR] 同期失敗: {}", e);
         }
     }
     println!();

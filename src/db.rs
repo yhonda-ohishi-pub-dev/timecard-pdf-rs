@@ -2,7 +2,55 @@ use mysql::*;
 use mysql::prelude::*;
 use chrono::{NaiveDateTime, NaiveDate, Datelike, Weekday};
 use std::env;
+use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 use crate::timecard_data::{Driver, DayRecord, MonthlyTimecard, TimecardSummary};
+
+/// time_card_allowanceのハッシュ比較用構造体
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct AllowanceData {
+    pub driver_id: i32,
+    pub shukkin_count: i64,      // f64 * 10 で整数化（比較用）
+    pub dayoff_count: i64,
+    pub paidoff_count: i64,
+    pub absence_count: i64,
+    pub overtime_count: i64,
+    pub holidaywork_count: i64,
+    pub additionalwork_payment: i32,
+    pub kachiku_payment: i32,
+    pub trail_payment: i32,
+    pub chikoku_count: i32,
+    pub soutai_count: i32,
+    pub tokukyu_count: i32,
+}
+
+impl AllowanceData {
+    /// MonthlyTimecardから生成
+    pub fn from_timecard(tc: &MonthlyTimecard) -> Self {
+        Self {
+            driver_id: tc.driver.id,
+            shukkin_count: (tc.summary.shukkin * 10.0) as i64,
+            dayoff_count: (tc.summary.kyuka as f64 * 10.0) as i64,
+            paidoff_count: (tc.summary.yukyu * 10.0) as i64,
+            absence_count: (tc.summary.kekkin as f64 * 10.0) as i64,
+            overtime_count: (tc.summary.total_zangyo * 10.0) as i64,
+            holidaywork_count: (tc.summary.kyushutsu * 10.0) as i64,
+            additionalwork_payment: tc.summary.tsuika,
+            kachiku_payment: tc.summary.kachiku,
+            trail_payment: tc.summary.trailer,
+            chikoku_count: tc.summary.chikoku,
+            soutai_count: tc.summary.soutai,
+            tokukyu_count: tc.summary.tokukyu,
+        }
+    }
+
+    /// ハッシュ値を計算
+    pub fn compute_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
 
 /// データベース接続設定
 #[derive(Clone)]
@@ -1442,14 +1490,102 @@ impl TimecardDb {
         )
     }
 
-    /// 全タイムカードのallowanceをINSERT（Docker DB）
-    pub fn insert_all_timecard_allowances_to_docker(&self, timecards: &[MonthlyTimecard]) -> Result<usize> {
-        let mut count = 0;
-        for tc in timecards {
-            self.insert_timecard_allowance_to_docker(tc)?;
-            count += 1;
+    /// Docker DBから該当月のallowanceをハッシュマップで取得
+    fn fetch_existing_allowances_from_docker(&self, year: i32, month: u32) -> Result<HashMap<i32, u64>> {
+        let docker_config = DbConfig::docker();
+        let docker_pool = Pool::new(Opts::from_url(&docker_config.connection_url())?)?;
+        let mut conn = docker_pool.get_conn()?;
+
+        let first_of_month = format!("{}-{:02}-01", year, month);
+
+        // MySQLのFromRowはタプル12個まで。query_mapで個別に取得
+        let mut result = HashMap::new();
+        conn.exec_map(
+            r"SELECT driver_id, shukkin_count, dayoff_count, paidoff_count, absence_count,
+                     overtime_count, holidaywork_count, additionalwork_payment, kachiku_payment,
+                     trail_payment, chikoku_count, soutai_count, tokukyu_count
+              FROM time_card_allowance
+              WHERE datetime = ?",
+            (&first_of_month,),
+            |row: mysql::Row| {
+                let driver_id: i32 = row.get(0).unwrap();
+                let data = AllowanceData {
+                    driver_id,
+                    shukkin_count: (row.get::<f64, _>(1).unwrap_or(0.0) * 10.0) as i64,
+                    dayoff_count: (row.get::<f64, _>(2).unwrap_or(0.0) * 10.0) as i64,
+                    paidoff_count: (row.get::<f64, _>(3).unwrap_or(0.0) * 10.0) as i64,
+                    absence_count: (row.get::<f64, _>(4).unwrap_or(0.0) * 10.0) as i64,
+                    overtime_count: (row.get::<f64, _>(5).unwrap_or(0.0) * 10.0) as i64,
+                    holidaywork_count: (row.get::<f64, _>(6).unwrap_or(0.0) * 10.0) as i64,
+                    additionalwork_payment: row.get(7).unwrap_or(0),
+                    kachiku_payment: row.get(8).unwrap_or(0),
+                    trail_payment: row.get(9).unwrap_or(0),
+                    chikoku_count: row.get(10).unwrap_or(0),
+                    soutai_count: row.get(11).unwrap_or(0),
+                    tokukyu_count: row.get(12).unwrap_or(0),
+                };
+                (driver_id, data.compute_hash())
+            }
+        )?.into_iter().for_each(|(id, hash)| { result.insert(id, hash); });
+
+        Ok(result)
+    }
+
+    /// 指定タイムカードのallowanceを差分更新（Docker DB）
+    /// 削除は行わない（新データに含まれるドライバーのみ追加/更新）
+    /// 戻り値: (inserted, updated, unchanged)
+    pub fn sync_all_timecard_allowances_to_docker(&self, timecards: &[MonthlyTimecard]) -> Result<(usize, usize, usize)> {
+        if timecards.is_empty() {
+            return Ok((0, 0, 0));
         }
-        Ok(count)
+
+        let year = timecards[0].year;
+        let month = timecards[0].month;
+
+        // 既存データをハッシュマップで取得
+        let existing = self.fetch_existing_allowances_from_docker(year, month)?;
+
+        // 新データのdriver_idセットとハッシュマップを作成
+        let mut new_data: HashMap<i32, AllowanceData> = HashMap::new();
+        for tc in timecards {
+            new_data.insert(tc.driver.id, AllowanceData::from_timecard(tc));
+        }
+
+        let mut inserted = 0;
+        let mut updated = 0;
+        let mut unchanged = 0;
+
+        // 追加/更新（新データに含まれるドライバーのみ処理）
+        for (driver_id, new_allowance) in &new_data {
+            let new_hash = new_allowance.compute_hash();
+
+            match existing.get(driver_id) {
+                Some(old_hash) if *old_hash == new_hash => {
+                    // 変更なし
+                    unchanged += 1;
+                }
+                Some(_) => {
+                    // 変更あり: UPDATE
+                    let tc = timecards.iter().find(|t| t.driver.id == *driver_id).unwrap();
+                    self.insert_timecard_allowance_to_docker(tc)?;
+                    updated += 1;
+                }
+                None => {
+                    // 新規: INSERT
+                    let tc = timecards.iter().find(|t| t.driver.id == *driver_id).unwrap();
+                    self.insert_timecard_allowance_to_docker(tc)?;
+                    inserted += 1;
+                }
+            }
+        }
+
+        Ok((inserted, updated, unchanged))
+    }
+
+    /// 全タイムカードのallowanceをINSERT（Docker DB）- 後方互換用
+    pub fn insert_all_timecard_allowances_to_docker(&self, timecards: &[MonthlyTimecard]) -> Result<usize> {
+        let (inserted, updated, _unchanged) = self.sync_all_timecard_allowances_to_docker(timecards)?;
+        Ok(inserted + updated)
     }
 
     /// タイムカードの拘束時間をDocker DBにINSERT
