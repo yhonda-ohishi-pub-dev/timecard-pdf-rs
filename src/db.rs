@@ -564,6 +564,7 @@ impl TimecardDb {
                             NaiveDate::parse_from_str(&end_str, "%Y-%m-%d")
                         ) {
                             let mut current = start_date;
+                            // PHPのDatePeriodは帰庫日も含む（出庫日0時から帰庫日時までループ）
                             while current <= end_date {
                                 if current >= start_month_parsed && current < end_month_parsed {
                                     let date_key = current.format("%Y-%m-%d").to_string();
@@ -628,18 +629,15 @@ impl TimecardDb {
         )?;
         let kyuka_set_trailer: std::collections::HashSet<String> = kyuka_for_trailer.into_iter().collect();
 
-        // PHPの_count_teateと同じロジック: 先月最後のdtako_rowを取得（けん引車のみ）
+        // PHPの_count_teateと同じロジック: 先月最後のdtako_rowを取得（車種問わず任意の運行）
         // 旅費が「除外」のものは除く（運行NOで結合）
         let last_trailer_dtako_datetime: Option<String> = conn.query_first(
             format!(
                 "SELECT DATE_FORMAT(dr.出庫日時, '%Y-%m-%d %H:%i:%s')
                  FROM dtako_rows dr
-                 INNER JOIN cars c ON c.id = dr.車輌CC
-                 INNER JOIN ryohi_sharyo_bunrui_rows rsbr ON rsbr.車輌R = c.name_R
                  LEFT JOIN ryohi_rows rr ON rr.運行NO = CONCAT(dr.運行NO, dr.対象乗務員区分) AND rr.適用 = '除外'
                  WHERE dr.対象乗務員CD = {}
                  AND dr.出庫日時 < '{}-{:02}-01'
-                 AND rsbr.旅費分類 = 'けん引'
                  AND rr.id IS NULL
                  ORDER BY dr.出庫日時 DESC
                  LIMIT 1",
@@ -693,6 +691,7 @@ impl TimecardDb {
                     NaiveDate::parse_from_str(&end_str, "%Y-%m-%d")
                 ) {
                     let mut current = start_date;
+                    // PHPのDatePeriodは帰庫日も含む（出庫日0時から帰庫日時までループ）
                     while current <= end_date {
                         if current >= start_month_parsed && current < end_month_parsed {
                             let date_key = current.format("%Y-%m-%d").to_string();
