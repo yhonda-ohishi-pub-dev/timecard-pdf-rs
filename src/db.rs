@@ -288,6 +288,28 @@ impl TimecardDb {
             }
         }
 
+        // デジタコデータがある日を取得（本番DBのtime_card_kosokuテーブル、type='デジタコ'）
+        // PHPの$drive配列と同等: 出退勤記号を[/]にするか</>にするかの判定に使用
+        let digitacho_days: Vec<u32> = conn.query_map(
+            format!(
+                "SELECT DAY(date) FROM time_card_kosoku
+                 WHERE driver_id = {}
+                 AND date >= '{}-{:02}-01'
+                 AND date < '{}-{:02}-01'
+                 AND type = 'デジタコ'",
+                driver.id, year, month,
+                if month == 12 { year + 1 } else { year },
+                if month == 12 { 1 } else { month + 1 }
+            ),
+            |day: u32| day
+        )?;
+
+        for day in digitacho_days {
+            if day >= 1 && day <= days.len() as u32 {
+                days[day as usize - 1].has_digitacho = true;
+            }
+        }
+
         // 「出」マーク（出張中）を取得 - ryohi_rowsの開始日時〜終了日時が複数日にまたがる場合
         // PHPの_make_ryohi_zangyo関数と同じロジック
         let start_month_parsed = NaiveDate::from_ymd_opt(year, month, 1).unwrap();

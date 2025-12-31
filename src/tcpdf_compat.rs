@@ -743,20 +743,32 @@ impl TcpdfCompat {
                 self.draw_rect(x, y, cell_w, 4.0);
 
                 // 勤務状態テキスト
+                // PHPロジック: デジタコがある日は[/]、ない日は</>
+                // [ = デジタコデータがある日の出勤
+                // ] = デジタコデータがある日の退勤
+                // < = デジタコデータがない日の出勤
+                // > = デジタコデータがない日の退勤
+                // = = 出退勤なしでデジタコのみ
+                // - = 出退勤なしで拘束時間（TC_DC）のみ
+                // X = 休暇
                 let mut st = String::new();
 
-                // 出勤/退勤マーク
+                // デジタコデータまたは備考が「仮乗」の場合は[/]を使用
+                let drive_st = day.has_digitacho || day.remarks == "仮乗";
+                let (arrow_left, arrow_right) = if drive_st { ('[', ']') } else { ('<', '>') };
+
+                // 出勤/退勤マーク（最大2回分）
                 if !day.clock_in.is_empty() {
-                    st.push('<');
+                    st.push(arrow_left);
                 }
                 if !day.clock_out.is_empty() {
-                    st.push('>');
+                    st.push(arrow_right);
                 }
                 if day.clock_in.len() > 1 {
-                    st.push('<');
+                    st.push(arrow_left);
                 }
                 if day.clock_out.len() > 1 {
-                    st.push('>');
+                    st.push(arrow_right);
                 }
 
                 // 休暇マーク
@@ -764,9 +776,15 @@ impl TcpdfCompat {
                     st.push('X');
                 }
 
-                // 拘束時間がある場合（デジタコデータがある）
-                if st.is_empty() && day.kosoku_minutes.is_some() {
-                    st.push('-');
+                // 出退勤がない場合
+                if st.is_empty() {
+                    if drive_st {
+                        // デジタコデータのみ（出退勤なし）
+                        st.push('=');
+                    } else if day.kosoku_minutes.is_some() {
+                        // 拘束時間（TC_DC）のみ
+                        st.push('-');
+                    }
                 }
 
                 if let (Some(layer), Some(font)) = (&self.current_layer, &self.font) {
@@ -799,14 +817,13 @@ impl TcpdfCompat {
                     layer.use_text(&teate, 9.0, mm(text_x), y_convert_text(y, 4.0, 9.0, self.page_height_mm), font);
                 }
             }
-
             // ===== 左下: 日別タイムカード（カレンダーの下、Y=30.0から開始） =====
             let daily_list_y = 30.0;
             self.render_shukei_daily_list(timecard, ind_x, daily_list_y);
 
             // ===== 集計欄: タイムカードリストの右側 =====
-            // タイムカードリストの幅: 8+8+14+14+14+14+14+18 = 104mm
-            let summary_x = ind_x + 110.0;  // タイムカードリストの右側
+            // タイムカードリストの幅: 8+8+14*7 = 114mm
+            let summary_x = ind_x + 120.0;  // タイムカードリストの右側
             let summary_y = daily_list_y;   // カレンダーの下と同じ高さ
 
             // 社員番号・氏名
@@ -964,13 +981,13 @@ impl TcpdfCompat {
     /// 集計モード: 日別タイムカードリストを描画
     fn render_shukei_daily_list(&self, timecard: &MonthlyTimecard, x: f64, start_y: f64) {
         let row_h = 4.5;  // 行の高さ
-        let col_widths = [8.0, 8.0, 14.0, 14.0, 14.0, 14.0, 14.0, 18.0];  // 日/曜/出勤1/退社1/出勤2/退社2/残業/備考
+        let col_widths = [8.0, 8.0, 14.0, 14.0, 14.0, 14.0, 14.0, 14.0, 14.0];  // 日/曜/出勤1/退社1/出勤2/退社2/残業/備考/拘束
 
         if let (Some(layer), Some(font)) = (&self.current_layer, &self.font) {
             layer.set_fill_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
 
             // ヘッダー行
-            let headers = ["日", "曜", "出勤1", "退社1", "出勤2", "退社2", "残業", "備考"];
+            let headers = ["日", "曜", "出勤1", "退社1", "出勤2", "退社2", "残業", "備考", "拘束"];
             let mut cx = x;
             for (i, header) in headers.iter().enumerate() {
                 self.draw_rect(cx, start_y, col_widths[i], row_h);
@@ -1038,15 +1055,9 @@ impl TcpdfCompat {
                 layer.use_text(clock_out2, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
                 cx += col_widths[5];
 
-                // 残業
+                // 残業（旅費から取得した残業時間）
                 self.draw_rect(cx, y, col_widths[6], row_h);
-                let zangyo_str = if let Some(minutes) = day.kosoku_minutes {
-                    let hours = minutes / 60;
-                    let mins = minutes % 60;
-                    format!("{:02}:{:02}", hours, mins)
-                } else {
-                    String::new()
-                };
+                let zangyo_str = day.zangyo_str();
                 let text_x = calc_text_x(cx, col_widths[6], &zangyo_str, 8.0, "C");
                 layer.use_text(&zangyo_str, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
                 cx += col_widths[6];
@@ -1055,6 +1066,13 @@ impl TcpdfCompat {
                 self.draw_rect(cx, y, col_widths[7], row_h);
                 let text_x = calc_text_x(cx, col_widths[7], &day.remarks, 8.0, "C");
                 layer.use_text(&day.remarks, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
+                cx += col_widths[7];
+
+                // 拘束時間
+                self.draw_rect(cx, y, col_widths[8], row_h);
+                let kosoku_str = day.kosoku_str();
+                let text_x = calc_text_x(cx, col_widths[8], &kosoku_str, 8.0, "C");
+                layer.use_text(&kosoku_str, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
             }
         }
     }
