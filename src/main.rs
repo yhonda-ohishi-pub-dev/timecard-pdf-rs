@@ -23,8 +23,12 @@ fn main() {
             run_db_mode(&args);
         }
         "pdf" => {
-            // PDFモード: DBからタイムカードを取得してPDF生成
+            // PDFモード: DBからタイムカードを取得してPDF生成（3人/ページ）
             run_pdf_mode(&args);
+        }
+        "pdf-shukei" => {
+            // PDF集計モード: DBからタイムカードを取得してPDF生成（1人/ページ、日付横並び）
+            run_pdf_shukei_mode(&args);
         }
         "verify" => {
             // 検証モード: 本番DBから計算してDocker DBにINSERT（TC_DC版）
@@ -184,6 +188,67 @@ fn run_pdf_mode(args: &[String]) {
     pdf.render_timecards(&timecards);
 
     let output_path = format!("timecard_{}_{:02}.pdf", year, month);
+    pdf.save(&output_path).expect("Failed to save PDF");
+
+    println!();
+    println!("PDF saved to {}", output_path);
+}
+
+/// PDF集計モード: DBからタイムカードを取得してPDF生成（1人/ページ、日付横並び）
+fn run_pdf_shukei_mode(args: &[String]) {
+    // 年月を引数から取得（デフォルト: 2025年12月）
+    let year: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2025);
+    let month: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(12);
+    // 特定のドライバーIDを指定可能（テスト用）
+    let target_driver_id: Option<i32> = args.get(4).and_then(|s| s.parse().ok());
+
+    println!("=== タイムカードPDF生成（集計モード）===");
+    println!("対象: {}年{}月", year, month);
+    println!("形式: 1人1ページ、日付横並び");
+    if let Some(id) = target_driver_id {
+        println!("ドライバーID: {}", id);
+    }
+    println!();
+
+    // 本番DBに接続
+    let config = DbConfig::production();
+    println!("接続先: {}:{}", config.host, config.port);
+
+    let db = match TimecardDb::connect(&config) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("DB接続エラー: {}", e);
+            return;
+        }
+    };
+    println!("接続成功！");
+    println!();
+
+    // 全ドライバーのタイムカードを取得（基礎日数付き）
+    let all_timecards = match db.get_all_monthly_timecards_with_kiso(year, month) {
+        Ok(tc) => tc,
+        Err(e) => {
+            eprintln!("タイムカード取得エラー: {}", e);
+            return;
+        }
+    };
+
+    // 特定のドライバーIDが指定されていればフィルタ
+    let timecards: Vec<_> = if let Some(id) = target_driver_id {
+        all_timecards.into_iter().filter(|tc| tc.driver.id == id).collect()
+    } else {
+        all_timecards
+    };
+
+    println!("取得したタイムカード数: {}", timecards.len());
+    println!();
+
+    // PDF生成（集計モード）
+    // A4横向き: 297mm x 210mm
+    let mut pdf = TcpdfCompat::new(297.0, 210.0, "L");
+    pdf.render_timecards_shukei(&timecards);
+
+    let output_path = format!("timecard_shukei_{}_{:02}.pdf", year, month);
     pdf.save(&output_path).expect("Failed to save PDF");
 
     println!();

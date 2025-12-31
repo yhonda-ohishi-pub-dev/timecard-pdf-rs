@@ -23,6 +23,7 @@ pub struct DayRecord {
     pub zangyo: Option<f64>,        // 残業時間（旅費から取得）
     pub is_kachiku: bool,           // 家畜車フラグ（「畜」マーク）
     pub is_trailer: bool,           // トレーラーフラグ（「引」マーク）
+    pub has_digitacho: bool,        // デジタコデータありフラグ（リンク表示用）
 }
 
 impl DayRecord {
@@ -39,6 +40,7 @@ impl DayRecord {
             zangyo: None,
             is_kachiku: false,
             is_trailer: false,
+            has_digitacho: false,
         }
     }
 
