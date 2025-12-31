@@ -14,18 +14,18 @@ COPY src ./src
 COPY fonts ./fonts
 RUN touch src/main.rs && cargo build --release
 
-# Stage 2: Runtime (distroless - glibcとSSL含む)
-FROM gcr.io/distroless/cc-debian12
+# Stage 2: Runtime (debian-slim - zlib含む)
+FROM debian:bookworm-slim
+
+# 必要なランタイムライブラリをインストール
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    zlib1g \
+    && rm -rf /var/lib/apt/lists/*
 
 # ビルド済みバイナリをコピー
 COPY --from=builder /app/target/release/timecard-pdf-rs /timecard-pdf-rs
-
-# 環境変数のデフォルト値
-ENV PROD_DB_HOST=172.18.21.35
-ENV PROD_DB_PORT=3306
-ENV PROD_DB_USER=root
-ENV PROD_DB_PASSWORD=ohishi
-ENV PROD_DB_NAME=db1
 
 # HTTPサーバーポート
 EXPOSE 8080
