@@ -630,18 +630,22 @@ impl TcpdfCompat {
             let ind_x = 5.0;   // 左マージン
             let mut y = 5.0;   // 開始Y座標
 
-            // ===== ヘッダー: 氏名（左端） =====
+            // ===== ヘッダー: 年月（左上）、氏名 =====
             if let (Some(layer), Some(font)) = (&self.current_layer, &self.font) {
                 layer.set_fill_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
 
-                // 氏名（左端に配置）
-                layer.use_text(&timecard.driver.name, 14.0, mm(ind_x), y_convert_text(y, 6.0, 14.0, self.page_height_mm), font);
+                // 年月（左上）
+                let year_month_display = format!("{}年{}月", timecard.year, timecard.month);
+                layer.use_text(&year_month_display, 12.0, mm(ind_x), y_convert_text(y, 6.0, 12.0, self.page_height_mm), font);
+
+                // 氏名（年月の右側に配置）
+                layer.use_text(&timecard.driver.name, 14.0, mm(ind_x + 30.0), y_convert_text(y, 6.0, 14.0, self.page_height_mm), font);
             }
 
             // ===== リンクボタン: TC, 集計, 出勤簿, DrV（名前の右側） =====
             let link_w = 30.0;
             let link_h = 5.0;
-            let link_x = ind_x + 45.0;  // 名前の右側に配置
+            let link_x = ind_x + 75.0;  // 名前の右側に配置
             let link_y = y;
             let link_labels = ["TC", "集計", "出勤簿", "DrV"];
             let year_month_str = format!("{}-{:02}-01", timecard.year, timecard.month);
@@ -818,12 +822,28 @@ impl TcpdfCompat {
                 }
             }
             // ===== 左下: 日別タイムカード（カレンダーの下、Y=30.0から開始） =====
+            // render_timecardsと同じ関数を使用
             let daily_list_y = 30.0;
-            self.render_shukei_daily_list(timecard, ind_x, daily_list_y);
+            let row_h = 5.0;
+            let col_day = 8.0;
+            let col_weekday = 6.0;
+            let col_time = 11.0;
+            let col_overtime = 11.0;
+            let col_remarks = 11.0;
+            let col_kosoku = 13.0;
+
+            // カラムヘッダー描画
+            self.render_column_headers(ind_x, daily_list_y, row_h,
+                col_day, col_weekday, col_time, col_overtime, col_remarks, col_kosoku);
+
+            // データ行描画
+            let data_start_y = daily_list_y + row_h;
+            self.render_timecard_data(timecard, ind_x, data_start_y, row_h,
+                col_day, col_weekday, col_time, col_overtime, col_remarks, col_kosoku);
 
             // ===== 集計欄: タイムカードリストの右側 =====
-            // タイムカードリストの幅: 8+8+14*7 = 114mm
-            let summary_x = ind_x + 120.0;  // タイムカードリストの右側
+            // タイムカードリストの幅: 8+6+11*4+11+11+13 = 93mm
+            let summary_x = ind_x + 100.0;  // タイムカードリストの右側
             let summary_y = daily_list_y;   // カレンダーの下と同じ高さ
 
             // 社員番号・氏名
@@ -974,105 +994,6 @@ impl TcpdfCompat {
                 let text_x = calc_text_x(cx, *w, value, 10.0, "C");
                 layer.use_text(value, 10.0, mm(text_x), y_convert_text(y4, row_h, 10.0, self.page_height_mm), font);
                 cx += w;
-            }
-        }
-    }
-
-    /// 集計モード: 日別タイムカードリストを描画
-    fn render_shukei_daily_list(&self, timecard: &MonthlyTimecard, x: f64, start_y: f64) {
-        let row_h = 4.5;  // 行の高さ
-        let col_widths = [8.0, 8.0, 14.0, 14.0, 14.0, 14.0, 14.0, 14.0, 14.0];  // 日/曜/出勤1/退社1/出勤2/退社2/残業/備考/拘束
-
-        if let (Some(layer), Some(font)) = (&self.current_layer, &self.font) {
-            layer.set_fill_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
-
-            // ヘッダー行
-            let headers = ["日", "曜", "出勤1", "退社1", "出勤2", "退社2", "残業", "備考", "拘束"];
-            let mut cx = x;
-            for (i, header) in headers.iter().enumerate() {
-                self.draw_rect(cx, start_y, col_widths[i], row_h);
-                let text_x = calc_text_x(cx, col_widths[i], header, 8.0, "C");
-                layer.use_text(*header, 8.0, mm(text_x), y_convert_text(start_y, row_h, 8.0, self.page_height_mm), font);
-                cx += col_widths[i];
-            }
-
-            // 日別データ
-            for (day_idx, day) in timecard.days.iter().enumerate() {
-                let y = start_y + row_h * (day_idx as f64 + 1.0);
-
-                // ページ下端チェック（A4横: 210mm）
-                if y + row_h > 200.0 {
-                    break;
-                }
-
-                let mut cx = x;
-
-                // 日曜日は背景グレー
-                let is_sunday = day.weekday == "日";
-                if is_sunday {
-                    let total_w: f64 = col_widths.iter().sum();
-                    self.draw_filled_rect_gray(cx, y, total_w, row_h);
-                }
-
-                // 日
-                self.draw_rect(cx, y, col_widths[0], row_h);
-                let day_str = day.day.to_string();
-                let text_x = calc_text_x(cx, col_widths[0], &day_str, 8.0, "C");
-                layer.use_text(&day_str, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
-                cx += col_widths[0];
-
-                // 曜
-                self.draw_rect(cx, y, col_widths[1], row_h);
-                let text_x = calc_text_x(cx, col_widths[1], &day.weekday, 8.0, "C");
-                layer.use_text(&day.weekday, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
-                cx += col_widths[1];
-
-                // 出勤1
-                self.draw_rect(cx, y, col_widths[2], row_h);
-                let clock_in1 = day.clock_in.first().map(|s| s.as_str()).unwrap_or("");
-                let text_x = calc_text_x(cx, col_widths[2], clock_in1, 8.0, "C");
-                layer.use_text(clock_in1, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
-                cx += col_widths[2];
-
-                // 退社1
-                self.draw_rect(cx, y, col_widths[3], row_h);
-                let clock_out1 = day.clock_out.first().map(|s| s.as_str()).unwrap_or("");
-                let text_x = calc_text_x(cx, col_widths[3], clock_out1, 8.0, "C");
-                layer.use_text(clock_out1, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
-                cx += col_widths[3];
-
-                // 出勤2
-                self.draw_rect(cx, y, col_widths[4], row_h);
-                let clock_in2 = day.clock_in.get(1).map(|s| s.as_str()).unwrap_or("");
-                let text_x = calc_text_x(cx, col_widths[4], clock_in2, 8.0, "C");
-                layer.use_text(clock_in2, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
-                cx += col_widths[4];
-
-                // 退社2
-                self.draw_rect(cx, y, col_widths[5], row_h);
-                let clock_out2 = day.clock_out.get(1).map(|s| s.as_str()).unwrap_or("");
-                let text_x = calc_text_x(cx, col_widths[5], clock_out2, 8.0, "C");
-                layer.use_text(clock_out2, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
-                cx += col_widths[5];
-
-                // 残業（旅費から取得した残業時間）
-                self.draw_rect(cx, y, col_widths[6], row_h);
-                let zangyo_str = day.zangyo_str();
-                let text_x = calc_text_x(cx, col_widths[6], &zangyo_str, 8.0, "C");
-                layer.use_text(&zangyo_str, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
-                cx += col_widths[6];
-
-                // 備考
-                self.draw_rect(cx, y, col_widths[7], row_h);
-                let text_x = calc_text_x(cx, col_widths[7], &day.remarks, 8.0, "C");
-                layer.use_text(&day.remarks, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
-                cx += col_widths[7];
-
-                // 拘束時間
-                self.draw_rect(cx, y, col_widths[8], row_h);
-                let kosoku_str = day.kosoku_str();
-                let text_x = calc_text_x(cx, col_widths[8], &kosoku_str, 8.0, "C");
-                layer.use_text(&kosoku_str, 8.0, mm(text_x), y_convert_text(y, row_h, 8.0, self.page_height_mm), font);
             }
         }
     }

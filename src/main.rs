@@ -128,9 +128,14 @@ fn run_pdf_mode(args: &[String]) {
     // 年月を引数から取得（デフォルト: 2025年12月）
     let year: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2025);
     let month: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(12);
+    // 特定のドライバーIDを指定可能
+    let target_driver_id: Option<i32> = args.get(4).and_then(|s| s.parse().ok());
 
     println!("=== タイムカードPDF生成 ===");
     println!("対象: {}年{}月", year, month);
+    if let Some(id) = target_driver_id {
+        println!("ドライバーID: {}", id);
+    }
     println!();
 
     // 本番DBに接続
@@ -158,14 +163,19 @@ fn run_pdf_mode(args: &[String]) {
     println!("基礎日数: {}", kiso_date);
     println!();
 
-    // 全ドライバーのタイムカードを取得（基礎日数付き）
-    let timecards = match db.get_all_monthly_timecards_with_kiso(year, month) {
+    // タイムカードを取得
+    let mut timecards = match db.get_all_monthly_timecards_with_kiso(year, month) {
         Ok(tc) => tc,
         Err(e) => {
             eprintln!("タイムカード取得エラー: {}", e);
             return;
         }
     };
+
+    // 特定ドライバーのみにフィルタリング
+    if let Some(driver_id) = target_driver_id {
+        timecards.retain(|tc| tc.driver.id == driver_id);
+    }
 
     println!("取得したタイムカード数: {}", timecards.len());
     println!();
@@ -187,7 +197,11 @@ fn run_pdf_mode(args: &[String]) {
     let mut pdf = TcpdfCompat::new(297.0, 210.0, "L");
     pdf.render_timecards(&timecards);
 
-    let output_path = format!("timecard_{}_{:02}.pdf", year, month);
+    let output_path = if let Some(id) = target_driver_id {
+        format!("timecard_{}_{:02}_{}.pdf", year, month, id)
+    } else {
+        format!("timecard_{}_{:02}.pdf", year, month)
+    };
     pdf.save(&output_path).expect("Failed to save PDF");
 
     println!();
