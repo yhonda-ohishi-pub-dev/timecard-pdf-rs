@@ -2,6 +2,7 @@ mod tcpdf_compat;
 mod coordinate_data;
 mod db;
 mod timecard_data;
+mod server;
 
 use std::fs;
 use std::env;
@@ -9,7 +10,8 @@ use coordinate_data::CoordinateData;
 use tcpdf_compat::TcpdfCompat;
 use db::{DbConfig, TimecardDb};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // .envファイルから環境変数を読み込み
     dotenvy::dotenv().ok();
     let args: Vec<String> = env::args().collect();
@@ -18,6 +20,11 @@ fn main() {
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("");
 
     match mode {
+        "server" => {
+            // HTTPサーバーモード
+            let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8080);
+            server::run(port).await;
+        }
         "db" => {
             // DBモード: タイムカードデータを取得して表示
             run_db_mode(&args);

@@ -7,6 +7,9 @@ use std::io::{BufWriter, Cursor};
 use crate::coordinate_data::*;
 use crate::timecard_data::MonthlyTimecard;
 
+/// 埋め込みフォント（MS明朝）- バイナリに静的に埋め込む
+static MSMINCHO_FONT: &[u8] = include_bytes!("../fonts/msmincho01.ttf");
+
 /// mm → Mm型
 fn mm(val: f64) -> Mm {
     Mm(val as f32)
@@ -122,10 +125,8 @@ impl TcpdfCompat {
     }
 
     pub fn render_elements(&mut self, elements: &[Element]) {
-        // フォントを読み込む
-        let font_data = std::fs::read("fonts/msmincho01.ttf")
-            .expect("Failed to read font file");
-        let cursor = Cursor::new(font_data);
+        // 埋め込みフォントを使用
+        let cursor = Cursor::new(MSMINCHO_FONT.to_vec());
         self.font = Some(
             self.doc
                 .add_external_font(cursor)
@@ -324,10 +325,8 @@ impl TcpdfCompat {
     /// タイムカードデータからPDFを生成
     /// 1ページに3人分のタイムカードを配置
     pub fn render_timecards(&mut self, timecards: &[MonthlyTimecard]) {
-        // フォントを読み込む
-        let font_data = std::fs::read("fonts/msmincho01.ttf")
-            .expect("Failed to read font file");
-        let cursor = Cursor::new(font_data);
+        // 埋め込みフォントを使用
+        let cursor = Cursor::new(MSMINCHO_FONT.to_vec());
         self.font = Some(
             self.doc
                 .add_external_font(cursor)
@@ -601,10 +600,8 @@ impl TcpdfCompat {
     /// 集計モード: タイムカードデータからPDFを生成
     /// 1人1ページ、日付を横並びで表示
     pub fn render_timecards_shukei(&mut self, timecards: &[MonthlyTimecard]) {
-        // フォントを読み込む
-        let font_data = std::fs::read("fonts/msmincho01.ttf")
-            .expect("Failed to read font file");
-        let cursor = Cursor::new(font_data);
+        // 埋め込みフォントを使用
+        let cursor = Cursor::new(MSMINCHO_FONT.to_vec());
         self.font = Some(
             self.doc
                 .add_external_font(cursor)
@@ -1032,6 +1029,86 @@ impl TcpdfCompat {
             layer.set_fill_color(Color::Rgb(Rgb::new(0.78, 0.78, 0.78, None)));
             layer.add_polygon(polygon);
         }
+    }
+
+    /// PDFをメモリ上で生成してバイト配列を返す（HTTPレスポンス用）
+    pub fn save_to_bytes(self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        // まずprintpdfでPDFをメモリ上に生成
+        let mut buffer = Vec::new();
+        {
+            self.doc.save(&mut BufWriter::new(&mut buffer))?;
+        }
+
+        // リンクがない場合はそのまま返す
+        if self.links.is_empty() {
+            return Ok(buffer);
+        }
+
+        // lopdfでPDFを読み込んでリンクを追加
+        let mut doc = Document::load_mem(&buffer)?;
+
+        let page_height_pt = mm_to_pt(self.page_height_mm);
+
+        for link in &self.links {
+            let page_idx = (link.page - 1) as usize;
+
+            let x1_pt = mm_to_pt(link.x_mm);
+            let y1_pt = page_height_pt - mm_to_pt(link.y_mm + link.h_mm);
+            let x2_pt = mm_to_pt(link.x_mm + link.w_mm);
+            let y2_pt = page_height_pt - mm_to_pt(link.y_mm);
+
+            let action_dict = Dictionary::from_iter(vec![
+                ("S", Object::Name(b"URI".to_vec())),
+                ("URI", Object::String(link.url.as_bytes().to_vec(), StringFormat::Literal)),
+            ]);
+
+            let annot_dict = Dictionary::from_iter(vec![
+                ("Type", Object::Name(b"Annot".to_vec())),
+                ("Subtype", Object::Name(b"Link".to_vec())),
+                ("Rect", Object::Array(vec![
+                    Object::Real(x1_pt as f32),
+                    Object::Real(y1_pt as f32),
+                    Object::Real(x2_pt as f32),
+                    Object::Real(y2_pt as f32),
+                ])),
+                ("Border", Object::Array(vec![
+                    Object::Integer(0),
+                    Object::Integer(0),
+                    Object::Integer(0),
+                ])),
+                ("A", Object::Dictionary(action_dict)),
+            ]);
+
+            let annot_id = doc.add_object(Object::Dictionary(annot_dict));
+
+            // ページIDを先に取得
+            let page_id = doc.page_iter().nth(page_idx);
+
+            if let Some(page_id) = page_id {
+                if let Ok(page_obj) = doc.get_object_mut(page_id) {
+                    if let Object::Dictionary(ref mut page_dict) = page_obj {
+                        let annots = if let Ok(existing) = page_dict.get(b"Annots") {
+                            if let Object::Array(arr) = existing.clone() {
+                                let mut new_arr = arr;
+                                new_arr.push(Object::Reference(annot_id));
+                                new_arr
+                            } else {
+                                vec![Object::Reference(annot_id)]
+                            }
+                        } else {
+                            vec![Object::Reference(annot_id)]
+                        };
+                        page_dict.set("Annots", Object::Array(annots));
+                    }
+                }
+            }
+        }
+
+        // PDFをメモリ上に保存
+        let mut output = Vec::new();
+        doc.save_to(&mut output)?;
+
+        Ok(output)
     }
 
     pub fn save(self, path: &str) -> Result<(), Box<dyn std::error::Error>> {

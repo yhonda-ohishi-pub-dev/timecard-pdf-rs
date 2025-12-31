@@ -5,6 +5,7 @@ use std::env;
 use crate::timecard_data::{Driver, DayRecord, MonthlyTimecard, TimecardSummary};
 
 /// データベース接続設定
+#[derive(Clone)]
 pub struct DbConfig {
     pub host: String,
     pub port: u16,
