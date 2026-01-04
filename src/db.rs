@@ -337,18 +337,14 @@ impl TimecardDb {
         }
 
         // 拘束時間をDocker DBのtime_card_kosokuテーブルから取得
-        // Rust計算とデジタコRustの両方を取得し、デジタコRustがあればデジタコRust、なければRust計算を使用
-        let docker_config = DbConfig::docker();
-        let docker_pool = Pool::new(Opts::from_url(&docker_config.connection_url())?)?;
-        let mut docker_conn = docker_pool.get_conn()?;
-
-        let kosoku_digitacho: Vec<(u32, i32)> = docker_conn.query_map(
+        // デジタコを優先、なければTC_DCを使用（本番DBから取得）
+        let kosoku_digitacho: Vec<(u32, i32)> = conn.query_map(
             format!(
                 "SELECT DAY(date), minutes FROM time_card_kosoku
                  WHERE driver_id = {}
                  AND date >= '{}-{:02}-01'
                  AND date < '{}-{:02}-01'
-                 AND type = 'デジタコRust'",
+                 AND type = 'デジタコ'",
                 driver.id, year, month,
                 if month == 12 { year + 1 } else { year },
                 if month == 12 { 1 } else { month + 1 }
@@ -356,13 +352,13 @@ impl TimecardDb {
             |(day, minutes): (u32, i32)| (day, minutes)
         )?;
 
-        let kosoku_tcdc: Vec<(u32, i32)> = docker_conn.query_map(
+        let kosoku_tcdc: Vec<(u32, i32)> = conn.query_map(
             format!(
                 "SELECT DAY(date), minutes FROM time_card_kosoku
                  WHERE driver_id = {}
                  AND date >= '{}-{:02}-01'
                  AND date < '{}-{:02}-01'
-                 AND type = 'Rust計算'",
+                 AND type = 'TC_DC'",
                 driver.id, year, month,
                 if month == 12 { year + 1 } else { year },
                 if month == 12 { 1 } else { month + 1 }
@@ -370,7 +366,7 @@ impl TimecardDb {
             |(day, minutes): (u32, i32)| (day, minutes)
         )?;
 
-        // デジタコRustを優先、なければRust計算を使用
+        // デジタコを優先、なければTC_DCを使用
         let mut kosoku_map: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
         for (day, minutes) in kosoku_tcdc {
             kosoku_map.insert(day, minutes);
@@ -1456,37 +1452,35 @@ impl TimecardDb {
             data.hire_retire.insert(driver_id, (before_hire, after_retire));
         }
 
-        // Docker DBから拘束時間を取得
-        self.fetch_batch_docker_kosoku(&mut data, ids_str, year, month)?;
+        // 本番DBから拘束時間を取得
+        self.fetch_batch_kosoku(&mut data, ids_str, year, month)?;
 
         Ok(data)
     }
 
-    /// Docker DBから拘束時間データをバッチ取得
-    fn fetch_batch_docker_kosoku(
+    /// 本番DBから拘束時間データをバッチ取得
+    fn fetch_batch_kosoku(
         &self,
         data: &mut BatchTimecardData,
         ids_str: &str,
         year: i32,
         month: u32,
     ) -> Result<()> {
-        let docker_config = DbConfig::docker();
-        let docker_pool = Pool::new(Opts::from_url(&docker_config.connection_url())?)?;
-        let mut docker_conn = docker_pool.get_conn()?;
+        let mut conn = self.pool.get_conn()?;
 
         let start_date_only = format!("{}-{:02}-01", year, month);
         let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
         let next_month_start = format!("{}-{:02}-01", next_year, next_month);
 
-        // デジタコRust
-        let kosoku_digitacho: Vec<(i32, u32, i32)> = docker_conn.query_map(
+        // デジタコ（本番DBから取得）
+        let kosoku_digitacho: Vec<(i32, u32, i32)> = conn.query_map(
             format!(
                 "SELECT driver_id, DAY(date), minutes
                  FROM time_card_kosoku
                  WHERE driver_id IN ({})
                  AND date >= '{}'
                  AND date < '{}'
-                 AND type = 'デジタコRust'",
+                 AND type = 'デジタコ'",
                 ids_str, start_date_only, next_month_start
             ),
             |(driver_id, day, minutes): (i32, u32, i32)| (driver_id, day, minutes)
@@ -1495,15 +1489,15 @@ impl TimecardDb {
             data.kosoku_digitacho.entry(driver_id).or_default().insert(day, minutes);
         }
 
-        // Rust計算
-        let kosoku_tcdc: Vec<(i32, u32, i32)> = docker_conn.query_map(
+        // TC_DC（本番DBから取得）
+        let kosoku_tcdc: Vec<(i32, u32, i32)> = conn.query_map(
             format!(
                 "SELECT driver_id, DAY(date), minutes
                  FROM time_card_kosoku
                  WHERE driver_id IN ({})
                  AND date >= '{}'
                  AND date < '{}'
-                 AND type = 'Rust計算'",
+                 AND type = 'TC_DC'",
                 ids_str, start_date_only, next_month_start
             ),
             |(driver_id, day, minutes): (i32, u32, i32)| (driver_id, day, minutes)
