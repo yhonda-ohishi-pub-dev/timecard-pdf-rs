@@ -2117,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "timecard-pdf-rs"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "axum",
  "chrono",

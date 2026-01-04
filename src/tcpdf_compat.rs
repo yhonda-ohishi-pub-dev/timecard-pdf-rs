@@ -407,6 +407,22 @@ impl TcpdfCompat {
             let name_y = y_convert_text(y, h, 12.0, self.page_height_mm);
             layer.use_text(name, 12.0, name_x, name_y, font);
 
+            // 氏名にリンクを追加（PHPのTimeCardController.php:3629相当）
+            let year_month_link = format!("{}-{:02}", timecard.year, timecard.month);
+            let link_w = 30.0;
+            layer.add_link_annotation(printpdf::LinkAnnotation::new(
+                printpdf::Rect::new(
+                    mm(x + 2.0),
+                    mm(self.page_height_mm - y - h),
+                    mm(x + 2.0 + link_w),
+                    mm(self.page_height_mm - y),
+                ),
+                None,
+                None,
+                printpdf::Actions::uri(format!("/time-card?driver_id={}&month={}", timecard.driver.id, year_month_link)),
+                None,
+            ));
+
             // 年月（右側）
             let year_month = timecard.year_month_str();
             let ym_x = mm(x + w - 35.0);
