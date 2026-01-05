@@ -62,10 +62,6 @@ struct BatchTimecardData {
     injects: HashMap<i32, Vec<String>>,
     /// 休暇データ: driver_id -> [(date, detail)]
     holidays: HashMap<i32, Vec<(String, String)>>,
-    /// 拘束時間（デジタコ）: driver_id -> {day -> minutes}
-    kosoku_digitacho: HashMap<i32, HashMap<u32, i32>>,
-    /// 拘束時間（TC_DC）: driver_id -> {day -> minutes}
-    kosoku_tcdc: HashMap<i32, HashMap<u32, i32>>,
     /// デジタコがある日: driver_id -> {day}
     digitacho_days: HashMap<i32, HashSet<u32>>,
     /// 出張マーク（split_line）: driver_id -> [(start, end)]
@@ -336,35 +332,12 @@ impl TimecardDb {
             }
         }
 
-        // 拘束時間をDocker DBのtime_card_kosokuテーブルから取得
-        // デジタコを優先、なければTC_DCを使用（本番DBから取得）
-        let kosoku_digitacho: Vec<(u32, i32)> = conn.query_map(
-            format!(
-                "SELECT DAY(date), minutes FROM time_card_kosoku
-                 WHERE driver_id = {}
-                 AND date >= '{}-{:02}-01'
-                 AND date < '{}-{:02}-01'
-                 AND type = 'デジタコ'",
-                driver.id, year, month,
-                if month == 12 { year + 1 } else { year },
-                if month == 12 { 1 } else { month + 1 }
-            ),
-            |(day, minutes): (u32, i32)| (day, minutes)
-        )?;
+        // 拘束時間をRustで計算
+        // 1. デジタコ版（dtako_events）を計算
+        let kosoku_digitacho = self.calculate_kosoku_digitacho(driver.id, year, month)?;
 
-        let kosoku_tcdc: Vec<(u32, i32)> = conn.query_map(
-            format!(
-                "SELECT DAY(date), minutes FROM time_card_kosoku
-                 WHERE driver_id = {}
-                 AND date >= '{}-{:02}-01'
-                 AND date < '{}-{:02}-01'
-                 AND type = 'TC_DC'",
-                driver.id, year, month,
-                if month == 12 { year + 1 } else { year },
-                if month == 12 { 1 } else { month + 1 }
-            ),
-            |(day, minutes): (u32, i32)| (day, minutes)
-        )?;
+        // 2. TC_DC版（始業→終業など打刻データ）を計算
+        let kosoku_tcdc = self.calculate_kosoku_from_punches(driver.id, year, month, days_in_month)?;
 
         // デジタコを優先、なければTC_DCを使用
         let mut kosoku_map: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
@@ -372,7 +345,7 @@ impl TimecardDb {
             kosoku_map.insert(day, minutes);
         }
         for (day, minutes) in kosoku_digitacho {
-            kosoku_map.insert(day, minutes); // デジタコRustで上書き
+            kosoku_map.insert(day, minutes); // デジタコで上書き
         }
 
         for (day, minutes) in kosoku_map {
@@ -1472,39 +1445,7 @@ impl TimecardDb {
         let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
         let next_month_start = format!("{}-{:02}-01", next_year, next_month);
 
-        // デジタコ（本番DBから取得）
-        let kosoku_digitacho: Vec<(i32, u32, i32)> = conn.query_map(
-            format!(
-                "SELECT driver_id, DAY(date), minutes
-                 FROM time_card_kosoku
-                 WHERE driver_id IN ({})
-                 AND date >= '{}'
-                 AND date < '{}'
-                 AND type = 'デジタコ'",
-                ids_str, start_date_only, next_month_start
-            ),
-            |(driver_id, day, minutes): (i32, u32, i32)| (driver_id, day, minutes)
-        )?;
-        for (driver_id, day, minutes) in kosoku_digitacho {
-            data.kosoku_digitacho.entry(driver_id).or_default().insert(day, minutes);
-        }
-
-        // TC_DC（本番DBから取得）
-        let kosoku_tcdc: Vec<(i32, u32, i32)> = conn.query_map(
-            format!(
-                "SELECT driver_id, DAY(date), minutes
-                 FROM time_card_kosoku
-                 WHERE driver_id IN ({})
-                 AND date >= '{}'
-                 AND date < '{}'
-                 AND type = 'TC_DC'",
-                ids_str, start_date_only, next_month_start
-            ),
-            |(driver_id, day, minutes): (i32, u32, i32)| (driver_id, day, minutes)
-        )?;
-        for (driver_id, day, minutes) in kosoku_tcdc {
-            data.kosoku_tcdc.entry(driver_id).or_default().insert(day, minutes);
-        }
+        // 拘束時間はbuild_timecard_from_batchで計算するため、ここでは取得しない
 
         Ok(())
     }
@@ -1585,19 +1526,22 @@ impl TimecardDb {
             }
         }
 
-        // 拘束時間を設定（デジタコRust優先）
-        if let Some(kosoku_tcdc) = batch_data.kosoku_tcdc.get(&driver.id) {
-            for (&day, &minutes) in kosoku_tcdc {
-                if day >= 1 && day <= days.len() as u32 {
-                    days[day as usize - 1].kosoku_minutes = Some(minutes);
-                }
+        // 拘束時間をRustで計算（デジタコ優先）
+        // 1. デジタコ版（dtako_events）を計算
+        let kosoku_digitacho = self.calculate_kosoku_digitacho(driver.id, year, month)?;
+
+        // 2. TC_DC版（始業→終業など打刻データ）を計算
+        let kosoku_tcdc = self.calculate_kosoku_from_punches(driver.id, year, month, days_in_month)?;
+
+        // TC_DCを先に設定、デジタコで上書き
+        for (day, minutes) in kosoku_tcdc {
+            if day >= 1 && day <= days.len() as u32 {
+                days[day as usize - 1].kosoku_minutes = Some(minutes);
             }
         }
-        if let Some(kosoku_digitacho) = batch_data.kosoku_digitacho.get(&driver.id) {
-            for (&day, &minutes) in kosoku_digitacho {
-                if day >= 1 && day <= days.len() as u32 {
-                    days[day as usize - 1].kosoku_minutes = Some(minutes);
-                }
+        for (day, minutes) in kosoku_digitacho {
+            if day >= 1 && day <= days.len() as u32 {
+                days[day as usize - 1].kosoku_minutes = Some(minutes);
             }
         }
 
