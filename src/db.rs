@@ -62,9 +62,9 @@ struct BatchTimecardData {
     injects: HashMap<i32, Vec<String>>,
     /// 休暇データ: driver_id -> [(date, detail)]
     holidays: HashMap<i32, Vec<(String, String)>>,
-    /// 拘束時間（デジタコRust）: driver_id -> {day -> minutes}
+    /// 拘束時間（デジタコ）: driver_id -> {day -> minutes}
     kosoku_digitacho: HashMap<i32, HashMap<u32, i32>>,
-    /// 拘束時間（Rust計算）: driver_id -> {day -> minutes}
+    /// 拘束時間（TC_DC）: driver_id -> {day -> minutes}
     kosoku_tcdc: HashMap<i32, HashMap<u32, i32>>,
     /// デジタコがある日: driver_id -> {day}
     digitacho_days: HashMap<i32, HashSet<u32>>,
@@ -2272,7 +2272,7 @@ impl TimecardDb {
 
             conn.exec_drop(
                 r"INSERT INTO time_card_kosoku (driver_id, date, minutes, type)
-                  VALUES (?, ?, ?, 'デジタコRust')
+                  VALUES (?, ?, ?, 'デジタコ')
                   ON DUPLICATE KEY UPDATE minutes = VALUES(minutes)",
                 (driver_id, &date, minutes)
             )?;
@@ -2487,7 +2487,7 @@ impl TimecardDb {
                     // INSERT（重複時はUPDATE）
                     conn.exec_drop(
                         r"INSERT INTO time_card_kosoku (driver_id, date, minutes, type)
-                          VALUES (?, ?, ?, 'Rust計算')
+                          VALUES (?, ?, ?, 'TC_DC')
                           ON DUPLICATE KEY UPDATE minutes = VALUES(minutes)",
                         (tc.driver.id, &date, minutes)
                     )?;

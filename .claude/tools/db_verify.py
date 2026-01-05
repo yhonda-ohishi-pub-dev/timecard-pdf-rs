@@ -142,7 +142,7 @@ class DbVerifier:
                 SELECT DATE_FORMAT(date, '%Y-%m-%d') as date, SUM(minutes) as minutes
                 FROM time_card_kosoku
                 WHERE driver_id = {driver_id}
-                AND type = 'Rust計算'
+                AND type = 'TC_DC'
                 AND date >= '{first_of_month}' AND date <= '{last_of_month}'
                 GROUP BY date
                 ORDER BY date
