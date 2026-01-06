@@ -265,13 +265,37 @@ impl TimecardDb {
 
                     match state {
                         30 => { // 始業
-                            if record.clock_in.len() < 2 {
-                                record.clock_in.push(time_str);
+                            // PHPロジック: 退勤が既にある場合は出勤[1]に入れる
+                            if !record.clock_out.is_empty() {
+                                // 退勤後の始業 → 出勤[1]
+                                if record.clock_in.len() < 2 {
+                                    if record.clock_in.is_empty() {
+                                        record.clock_in.push(String::new()); // 出勤[0]は空
+                                    }
+                                    record.clock_in.push(time_str);
+                                }
+                            } else {
+                                // 通常: 出勤[0]に追加
+                                if record.clock_in.len() < 2 {
+                                    record.clock_in.push(time_str);
+                                }
                             }
                         }
                         31 => { // 終業
-                            if record.clock_out.len() < 2 {
-                                record.clock_out.push(time_str);
+                            // PHPロジック: 出勤[1]がある場合は退勤[1]に入れる
+                            if record.clock_in.len() > 1 {
+                                // 出勤[1]がある → 退勤[1]
+                                if record.clock_out.len() < 2 {
+                                    if record.clock_out.is_empty() {
+                                        record.clock_out.push(String::new()); // 退勤[0]は空
+                                    }
+                                    record.clock_out.push(time_str);
+                                }
+                            } else {
+                                // 通常: 退勤[0]に追加
+                                if record.clock_out.len() < 2 {
+                                    record.clock_out.push(time_str);
+                                }
                             }
                         }
                         _ => {}
@@ -1480,13 +1504,37 @@ impl TimecardDb {
                         let record = &mut days[day - 1];
                         match *state {
                             30 => { // 始業
-                                if record.clock_in.len() < 2 {
-                                    record.clock_in.push(time_str);
+                                // PHPロジック: 退勤が既にある場合は出勤[1]に入れる
+                                if !record.clock_out.is_empty() {
+                                    // 退勤後の始業 → 出勤[1]
+                                    if record.clock_in.len() < 2 {
+                                        if record.clock_in.is_empty() {
+                                            record.clock_in.push(String::new()); // 出勤[0]は空
+                                        }
+                                        record.clock_in.push(time_str);
+                                    }
+                                } else {
+                                    // 通常: 出勤[0]に追加
+                                    if record.clock_in.len() < 2 {
+                                        record.clock_in.push(time_str);
+                                    }
                                 }
                             }
                             31 => { // 終業
-                                if record.clock_out.len() < 2 {
-                                    record.clock_out.push(time_str);
+                                // PHPロジック: 出勤[1]がある場合は退勤[1]に入れる
+                                if record.clock_in.len() > 1 {
+                                    // 出勤[1]がある → 退勤[1]
+                                    if record.clock_out.len() < 2 {
+                                        if record.clock_out.is_empty() {
+                                            record.clock_out.push(String::new()); // 退勤[0]は空
+                                        }
+                                        record.clock_out.push(time_str);
+                                    }
+                                } else {
+                                    // 通常: 退勤[0]に追加
+                                    if record.clock_out.len() < 2 {
+                                        record.clock_out.push(time_str);
+                                    }
                                 }
                             }
                             _ => {}
