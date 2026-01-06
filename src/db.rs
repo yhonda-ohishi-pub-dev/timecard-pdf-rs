@@ -339,13 +339,13 @@ impl TimecardDb {
         // 2. TC_DC版（始業→終業など打刻データ）を計算
         let kosoku_tcdc = self.calculate_kosoku_from_punches(driver.id, year, month, days_in_month)?;
 
-        // デジタコを優先、なければTC_DCを使用
+        // TC_DC + デジタコを合算
         let mut kosoku_map: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
         for (day, minutes) in kosoku_tcdc {
-            kosoku_map.insert(day, minutes);
+            *kosoku_map.entry(day).or_insert(0) += minutes;
         }
         for (day, minutes) in kosoku_digitacho {
-            kosoku_map.insert(day, minutes); // デジタコで上書き
+            *kosoku_map.entry(day).or_insert(0) += minutes;
         }
 
         for (day, minutes) in kosoku_map {
@@ -1526,20 +1526,22 @@ impl TimecardDb {
             }
         }
 
-        // 拘束時間をRustで計算（デジタコ優先）
+        // 拘束時間をRustで計算（TC_DC + デジタコを合算）
         // 1. デジタコ版（dtako_events）を計算
         let kosoku_digitacho = self.calculate_kosoku_digitacho(driver.id, year, month)?;
 
         // 2. TC_DC版（始業→終業など打刻データ）を計算
         let kosoku_tcdc = self.calculate_kosoku_from_punches(driver.id, year, month, days_in_month)?;
 
-        // TC_DCを先に設定、デジタコで上書き
+        // TC_DC + デジタコを合算
+        let mut kosoku_map: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
         for (day, minutes) in kosoku_tcdc {
-            if day >= 1 && day <= days.len() as u32 {
-                days[day as usize - 1].kosoku_minutes = Some(minutes);
-            }
+            *kosoku_map.entry(day).or_insert(0) += minutes;
         }
         for (day, minutes) in kosoku_digitacho {
+            *kosoku_map.entry(day).or_insert(0) += minutes;
+        }
+        for (day, minutes) in kosoku_map {
             if day >= 1 && day <= days.len() as u32 {
                 days[day as usize - 1].kosoku_minutes = Some(minutes);
             }
@@ -1857,9 +1859,10 @@ impl TimecardDb {
             }
             let next = &events[i + 1];
 
-            match (current.event_type.as_str(), next.event_type.as_str()) {
-                // 始業→運行開始: 同時刻重複や運行開始→始業はスキップ
-                ("始業", "運行開始") => {
+            // PHPと同じif-elseif構造: 始業の次が運行開始なら始業→終業は計算しない
+            if current.event_type == "始業" {
+                if next.event_type == "運行開始" {
+                    // 始業→運行開始: 同時刻重複や運行開始→始業はスキップ
                     // 同時刻なら重複スキップ
                     if current.datetime == next.datetime {
                         continue;
@@ -1879,10 +1882,8 @@ impl TimecardDb {
                             *day_minutes.entry(next.datetime.day()).or_insert(0) += minutes;
                         }
                     }
-                }
-
-                // 始業→終業
-                ("始業", "終業") => {
+                } else if next.event_type == "終業" {
+                    // 始業→終業（始業の次が運行開始でない場合のみ）
                     let duration = next.datetime.signed_duration_since(current.datetime);
                     let days_diff = (next.datetime.date() - current.datetime.date()).num_days();
 
@@ -1923,7 +1924,10 @@ impl TimecardDb {
                         }
                     }
                 }
+                continue;
+            }
 
+            match (current.event_type.as_str(), next.event_type.as_str()) {
                 // 運行終了→終業
                 ("運行終了", "終業") => {
                     let duration = next.datetime.signed_duration_since(current.datetime);
