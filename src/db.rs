@@ -363,7 +363,21 @@ impl TimecardDb {
         // 2. TC_DC版（始業→終業など打刻データ）を計算
         let kosoku_tcdc = self.calculate_kosoku_from_punches(driver.id, year, month, days_in_month)?;
 
-        // TC_DC + デジタコを合算
+        // TC_DCを別々に保存（INSERT用）
+        for (day, minutes) in &kosoku_tcdc {
+            if *day >= 1 && *day <= days.len() as u32 {
+                days[*day as usize - 1].kosoku_tcdc = Some(*minutes);
+            }
+        }
+
+        // デジタコを別々に保存（INSERT用）
+        for (day, minutes) in &kosoku_digitacho {
+            if *day >= 1 && *day <= days.len() as u32 {
+                days[*day as usize - 1].kosoku_digitacho = Some(*minutes);
+            }
+        }
+
+        // TC_DC + デジタコを合算（表示用）
         let mut kosoku_map: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
         for (day, minutes) in kosoku_tcdc {
             *kosoku_map.entry(day).or_insert(0) += minutes;
@@ -1581,7 +1595,21 @@ impl TimecardDb {
         // 2. TC_DC版（始業→終業など打刻データ）を計算
         let kosoku_tcdc = self.calculate_kosoku_from_punches(driver.id, year, month, days_in_month)?;
 
-        // TC_DC + デジタコを合算
+        // TC_DCを別々に保存（INSERT用）
+        for (day, minutes) in &kosoku_tcdc {
+            if *day >= 1 && *day <= days.len() as u32 {
+                days[*day as usize - 1].kosoku_tcdc = Some(*minutes);
+            }
+        }
+
+        // デジタコを別々に保存（INSERT用）
+        for (day, minutes) in &kosoku_digitacho {
+            if *day >= 1 && *day <= days.len() as u32 {
+                days[*day as usize - 1].kosoku_digitacho = Some(*minutes);
+            }
+        }
+
+        // TC_DC + デジタコを合算（表示用）
         let mut kosoku_map: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
         for (day, minutes) in kosoku_tcdc {
             *kosoku_map.entry(day).or_insert(0) += minutes;
@@ -2467,7 +2495,7 @@ impl TimecardDb {
         Ok(inserted + updated)
     }
 
-    /// タイムカードの拘束時間をDocker DBにINSERT
+    /// タイムカードの拘束時間をDocker DBにINSERT（TC_DCとデジタコを別々に）
     pub fn insert_kosoku_to_docker(&self, timecards: &[MonthlyTimecard]) -> Result<usize> {
         let docker_config = DbConfig::docker();
         let docker_pool = Pool::new(Opts::from_url(&docker_config.connection_url())?)?;
@@ -2477,13 +2505,24 @@ impl TimecardDb {
 
         for tc in timecards {
             for day in &tc.days {
-                if let Some(minutes) = day.kosoku_minutes {
-                    let date = format!("{}-{:02}-{:02}", tc.year, tc.month, day.day);
+                let date = format!("{}-{:02}-{:02}", tc.year, tc.month, day.day);
 
-                    // INSERT（重複時はUPDATE）
+                // TC_DC版をINSERT
+                if let Some(minutes) = day.kosoku_tcdc {
                     conn.exec_drop(
                         r"INSERT INTO time_card_kosoku (driver_id, date, minutes, type)
                           VALUES (?, ?, ?, 'TC_DC')
+                          ON DUPLICATE KEY UPDATE minutes = VALUES(minutes)",
+                        (tc.driver.id, &date, minutes)
+                    )?;
+                    inserted += 1;
+                }
+
+                // デジタコ版をINSERT
+                if let Some(minutes) = day.kosoku_digitacho {
+                    conn.exec_drop(
+                        r"INSERT INTO time_card_kosoku (driver_id, date, minutes, type)
+                          VALUES (?, ?, ?, 'デジタコ')
                           ON DUPLICATE KEY UPDATE minutes = VALUES(minutes)",
                         (tc.driver.id, &date, minutes)
                     )?;

@@ -19,7 +19,9 @@ pub struct DayRecord {
     pub clock_out: Vec<String>,     // 退勤時刻（最大2回）
     pub remarks: String,            // 備考（公休、有休等）
     pub is_sunday: bool,            // 日曜日フラグ
-    pub kosoku_minutes: Option<i32>, // 拘束時間（分）
+    pub kosoku_minutes: Option<i32>, // 拘束時間（分）- 表示用（TC_DC + デジタコ合算）
+    pub kosoku_tcdc: Option<i32>,   // TC_DC版拘束時間（分）- INSERT用
+    pub kosoku_digitacho: Option<i32>, // デジタコ版拘束時間（分）- INSERT用
     pub zangyo: Option<f64>,        // 残業時間（旅費から取得）
     pub is_kachiku: bool,           // 家畜車フラグ（「畜」マーク）
     pub is_trailer: bool,           // トレーラーフラグ（「引」マーク）
@@ -37,6 +39,8 @@ impl DayRecord {
             remarks: String::new(),
             is_sunday,
             kosoku_minutes: None,
+            kosoku_tcdc: None,
+            kosoku_digitacho: None,
             zangyo: None,
             is_kachiku: false,
             is_trailer: false,

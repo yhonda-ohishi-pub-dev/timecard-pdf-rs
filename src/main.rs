@@ -198,6 +198,17 @@ fn run_pdf_mode(args: &[String]) {
             eprintln!("[ERROR] 同期失敗: {}", e);
         }
     }
+
+    // time_card_kosokuテーブルを更新（Docker DB）- TC_DCとデジタコを別々に
+    println!("time_card_kosoku（Docker DB）を更新...");
+    match db.insert_kosoku_to_docker(&timecards) {
+        Ok(count) => {
+            println!("[OK] {}件INSERT/UPDATE完了", count);
+        }
+        Err(e) => {
+            eprintln!("[ERROR] INSERT失敗: {}", e);
+        }
+    }
     println!();
 
     // PDF生成
