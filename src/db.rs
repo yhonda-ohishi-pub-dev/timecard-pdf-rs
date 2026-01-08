@@ -244,12 +244,19 @@ impl TimecardDb {
         let end_date = format!("{}-{:02}-{:02} 23:59:59", year, month, days_in_month);
 
         // datetimeを文字列として取得し、手動でパース
+        // PHPのnotMatching('TimeCardInject')と同等: injectに存在するdstateを除外
         let punches: Vec<(String, i32)> = conn.query_map(
             format!(
-                "SELECT DATE_FORMAT(datetime, '%Y-%m-%d %H:%i:%s') as dt, state FROM time_card_dstate
-                 WHERE id = {}
-                 AND datetime BETWEEN '{}' AND '{}'
-                 ORDER BY datetime",
+                "SELECT DATE_FORMAT(tcd.datetime, '%Y-%m-%d %H:%i:%s') as dt, tcd.state FROM time_card_dstate tcd
+                 WHERE tcd.id = {}
+                 AND tcd.datetime BETWEEN '{}' AND '{}'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM time_card_inject tci
+                     WHERE tci.driver_id = tcd.id
+                     AND tci.datetime = tcd.datetime
+                     AND tci.deleted IS NULL
+                 )
+                 ORDER BY tcd.datetime",
                 driver.id, start_date, end_date
             ),
             |(datetime, state): (String, i32)| (datetime, state)
