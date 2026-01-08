@@ -1042,13 +1042,20 @@ impl TimecardDb {
         let next_month_start = format!("{}-{:02}-01", next_year, next_month);
 
         // 1. 打刻データ（time_card_dstate）
+        // PHPのnotMatching('TimeCardInject')と同等: injectに存在するdstateを除外
         let punches: Vec<(i32, String, i32)> = conn.query_map(
             format!(
-                "SELECT id, DATE_FORMAT(datetime, '%Y-%m-%d %H:%i:%s'), state
-                 FROM time_card_dstate
-                 WHERE id IN ({})
-                 AND datetime BETWEEN '{}' AND '{}'
-                 ORDER BY id, datetime",
+                "SELECT tcd.id, DATE_FORMAT(tcd.datetime, '%Y-%m-%d %H:%i:%s'), tcd.state
+                 FROM time_card_dstate tcd
+                 WHERE tcd.id IN ({})
+                 AND tcd.datetime BETWEEN '{}' AND '{}'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM time_card_inject tci
+                     WHERE tci.driver_id = tcd.id
+                     AND tci.datetime = tcd.datetime
+                     AND tci.deleted IS NULL
+                 )
+                 ORDER BY tcd.id, tcd.datetime",
                 ids_str, start_date, end_date
             ),
             |(driver_id, datetime, state): (i32, String, i32)| (driver_id, datetime, state)
@@ -1855,6 +1862,7 @@ impl TimecardDb {
 
         // time_card_dstate から始業(30)・終業(31)を取得
         // PHPのTimeCardDtakoStateテーブルを参照してstate名を取得
+        // PHPのnotMatching('TimeCardInject')と同等: injectに存在するdstateを除外
         let tc_dstate: Vec<(String, String)> = conn.query_map(
             format!(
                 "SELECT DATE_FORMAT(tcd.datetime, '%Y-%m-%d %H:%i:%s') as dt, tcds.name as st
@@ -1863,6 +1871,12 @@ impl TimecardDb {
                  WHERE tcd.id = {}
                  AND tcd.datetime >= '{}'
                  AND tcd.datetime < '{}'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM time_card_inject tci
+                     WHERE tci.driver_id = tcd.id
+                     AND tci.datetime = tcd.datetime
+                     AND tci.deleted IS NULL
+                 )
                  ORDER BY tcd.datetime",
                 driver_id, start_date, end_date
             ),
