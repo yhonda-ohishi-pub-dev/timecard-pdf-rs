@@ -26,6 +26,7 @@ pub struct DayRecord {
     pub is_kachiku: bool,           // 家畜車フラグ（「畜」マーク）
     pub is_trailer: bool,           // トレーラーフラグ（「引」マーク）
     pub has_digitacho: bool,        // デジタコデータありフラグ（リンク表示用）
+    pub has_daily_report: bool,     // 作業日報フラグ（「作」マーク）
 }
 
 impl DayRecord {
@@ -45,6 +46,7 @@ impl DayRecord {
             is_kachiku: false,
             is_trailer: false,
             has_digitacho: false,
+            has_daily_report: false,
         }
     }
 

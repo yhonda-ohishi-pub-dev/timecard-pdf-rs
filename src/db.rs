@@ -94,6 +94,8 @@ struct BatchTimecardData {
     tsuika_counts: HashMap<i32, i32>,
     /// 入社前/退職後日数: driver_id -> (before_hire, after_retire)
     hire_retire: HashMap<i32, (i32, i32)>,
+    /// 作業日報がある日: driver_id -> {day}
+    daily_report_days: HashMap<i32, HashSet<u32>>,
 }
 
 /// データベース接続設定
@@ -1477,6 +1479,23 @@ impl TimecardDb {
             data.hire_retire.insert(driver_id, (before_hire, after_retire));
         }
 
+        // 21. 作業日報がある日（daily_report_detail）
+        let daily_reports: Vec<(i32, u32)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DAY(act_date) as day
+                 FROM daily_report_detail
+                 WHERE driver_id IN ({})
+                 AND act_date >= '{}'
+                 AND act_date < '{}'
+                 GROUP BY driver_id, DAY(act_date)",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, day): (i32, u32)| (driver_id, day)
+        )?;
+        for (driver_id, day) in daily_reports {
+            data.daily_report_days.entry(driver_id).or_default().insert(day);
+        }
+
         // 本番DBから拘束時間を取得
         self.fetch_batch_kosoku(&mut data, ids_str, year, month)?;
 
@@ -1815,6 +1834,15 @@ impl TimecardDb {
                     if day >= 1 && day <= days.len() {
                         days[day - 1].is_trailer = true;
                     }
+                }
+            }
+        }
+
+        // 作業日報フラグを設定
+        if let Some(daily_report_days) = batch_data.daily_report_days.get(&driver.id) {
+            for &day in daily_report_days {
+                if day >= 1 && day <= days.len() as u32 {
+                    days[day as usize - 1].has_daily_report = true;
                 }
             }
         }

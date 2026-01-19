@@ -472,7 +472,12 @@ impl TcpdfCompat {
                 let out2 = day.clock_out.get(1).map(|s| s.as_str()).unwrap_or("");
 
                 // 備考（PHPでは畜/引マークを備考に出力していない）
-                let remarks = day.remarks.clone();
+                // 作業日報がある場合は「作」マークを追加（備考の内容に関係なく連結）
+                let remarks = if day.has_daily_report {
+                    format!("{}作", day.remarks)
+                } else {
+                    day.remarks.clone()
+                };
 
                 let values = [
                     day.day.to_string(),
@@ -514,6 +519,24 @@ impl TcpdfCompat {
                         let text_x = calc_text_x(current_x, *width, value, font_size, "C");
                         let text_y = y_convert_text(y, row_h, font_size, self.page_height_mm);
                         layer.use_text(value, font_size, mm(text_x), text_y, font);
+                    }
+
+                    // 備考欄（col_idx=7）で作業日報がある場合はリンクを追加
+                    if col_idx == 7 && day.has_daily_report {
+                        let act_date = format!("{}-{:02}-{:02}", timecard.year, timecard.month, day.day);
+                        let url = format!("/daily-report/search-report/{}/{}", act_date, timecard.driver.id);
+                        layer.add_link_annotation(printpdf::LinkAnnotation::new(
+                            printpdf::Rect::new(
+                                mm(current_x),
+                                mm(self.page_height_mm - y - row_h),
+                                mm(current_x + *width),
+                                mm(self.page_height_mm - y),
+                            ),
+                            None, // border
+                            None, // color
+                            printpdf::Actions::uri(url),
+                            None, // highlighting mode
+                        ));
                     }
 
                     current_x += width;
