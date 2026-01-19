@@ -27,6 +27,7 @@ pub struct DayRecord {
     pub is_trailer: bool,           // トレーラーフラグ（「引」マーク）
     pub has_digitacho: bool,        // デジタコデータありフラグ（リンク表示用）
     pub has_daily_report: bool,     // 作業日報フラグ（「作」マーク）
+    pub tsuika_count: i32,          // 追加作業件数
 }
 
 impl DayRecord {
@@ -47,6 +48,7 @@ impl DayRecord {
             is_trailer: false,
             has_digitacho: false,
             has_daily_report: false,
+            tsuika_count: 0,
         }
     }
 
@@ -73,6 +75,28 @@ impl DayRecord {
                 }
             }
             _ => String::new(),
+        }
+    }
+
+    /// 追加作業を表示用文字列に変換
+    /// 1件=「〇」、2件=「〇〇」、3件以上=「〇n」
+    pub fn tsuika_str(&self) -> String {
+        match self.tsuika_count {
+            0 => String::new(),
+            1 => "〇".to_string(),
+            2 => "〇〇".to_string(),
+            n => format!("〇{}", n),
+        }
+    }
+
+    /// 残業+追加作業の連結表示（PHPのdispZangyo_st相当）
+    pub fn zangyo_with_tsuika_str(&self) -> String {
+        let zangyo = self.zangyo_str();
+        let tsuika = self.tsuika_str();
+        if zangyo.is_empty() {
+            tsuika
+        } else {
+            format!("{}{}", zangyo, tsuika)
         }
     }
 }

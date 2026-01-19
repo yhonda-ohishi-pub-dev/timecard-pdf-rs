@@ -119,7 +119,7 @@ fn run_db_mode(args: &[String]) {
             let out1 = day.clock_out.get(0).map(|s| s.as_str()).unwrap_or("");
             let in2 = day.clock_in.get(1).map(|s| s.as_str()).unwrap_or("");
             let out2 = day.clock_out.get(1).map(|s| s.as_str()).unwrap_or("");
-            let zangyo = day.zangyo_str();
+            let zangyo = day.zangyo_with_tsuika_str();
             let kosoku = day.kosoku_str();
 
             let sunday_mark = if day.is_sunday { "*" } else { " " };

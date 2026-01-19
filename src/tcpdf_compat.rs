@@ -486,7 +486,7 @@ impl TcpdfCompat {
                     out1.to_string(),
                     in2.to_string(),
                     out2.to_string(),
-                    day.zangyo_str(),       // 残業（旅費から取得）
+                    day.zangyo_with_tsuika_str(),  // 残業+追加作業
                     remarks,                // 備考
                     day.kosoku_str(),       // 拘束時間（別列）
                 ];

@@ -90,8 +90,10 @@ struct BatchTimecardData {
     trailer_dtako: HashMap<i32, Vec<(String, String)>>,
     /// けん引マーク: driver_id -> [date]
     trailer_detail: HashMap<i32, Vec<String>>,
-    /// 追加作業カウント: driver_id -> count
+    /// 追加作業カウント（月間）: driver_id -> count
     tsuika_counts: HashMap<i32, i32>,
+    /// 日別追加作業カウント: driver_id -> {day -> count}
+    tsuika_daily: HashMap<i32, HashMap<u32, i32>>,
     /// 入社前/退職後日数: driver_id -> (before_hire, after_retire)
     hire_retire: HashMap<i32, (i32, i32)>,
     /// 作業日報がある日: driver_id -> {day}
@@ -873,6 +875,28 @@ impl TimecardDb {
         )?.unwrap_or(0);
         summary.tsuika = tsuika_count as i32;
 
+        // 日別追加作業カウント
+        let tsuika_daily: Vec<(u32, i64)> = conn.query_map(
+            format!(
+                "SELECT DAY(end_date) as day, COUNT(*) as cnt
+                 FROM ryohi_ichiban_rows
+                 WHERE driver_id = {}
+                 AND type = '追加作業'
+                 AND end_date >= '{}-{:02}-01'
+                 AND end_date < '{}-{:02}-01'
+                 GROUP BY DAY(end_date)",
+                driver.id, year, month,
+                if month == 12 { year + 1 } else { year },
+                if month == 12 { 1 } else { month + 1 }
+            ),
+            |(day, count): (u32, i64)| (day, count)
+        )?;
+        for (day, count) in tsuika_daily {
+            if let Some(record) = days.get_mut((day - 1) as usize) {
+                record.tsuika_count = count as i32;
+            }
+        }
+
         let mut timecard = MonthlyTimecard {
             driver: driver.clone(),
             year,
@@ -1416,7 +1440,7 @@ impl TimecardDb {
             data.trailer_detail.entry(driver_id).or_default().push(date);
         }
 
-        // 19. 追加作業カウント
+        // 19. 追加作業カウント（月間）
         let tsuika: Vec<(i32, i64)> = conn.query_map(
             format!(
                 "SELECT driver_id, COUNT(*)
@@ -1432,6 +1456,24 @@ impl TimecardDb {
         )?;
         for (driver_id, count) in tsuika {
             data.tsuika_counts.insert(driver_id, count as i32);
+        }
+
+        // 19b. 日別追加作業カウント
+        let tsuika_daily_rows: Vec<(i32, u32, i64)> = conn.query_map(
+            format!(
+                "SELECT driver_id, DAY(end_date) as day, COUNT(*) as cnt
+                 FROM ryohi_ichiban_rows
+                 WHERE driver_id IN ({})
+                 AND type = '追加作業'
+                 AND end_date >= '{}'
+                 AND end_date < '{}'
+                 GROUP BY driver_id, DAY(end_date)",
+                ids_str, start_date_only, next_month_start
+            ),
+            |(driver_id, day, count): (i32, u32, i64)| (driver_id, day, count)
+        )?;
+        for (driver_id, day, count) in tsuika_daily_rows {
+            data.tsuika_daily.entry(driver_id).or_default().insert(day, count as i32);
         }
 
         // 20. 入社日/退職日（kyuyo_shain.driver_idで結合）
@@ -1858,8 +1900,17 @@ impl TimecardDb {
             }
         }
 
-        // 追加作業
+        // 追加作業（月間）
         summary.tsuika = batch_data.tsuika_counts.get(&driver.id).cloned().unwrap_or(0);
+
+        // 日別追加作業カウント
+        if let Some(daily_map) = batch_data.tsuika_daily.get(&driver.id) {
+            for (&day, &count) in daily_map {
+                if day >= 1 && day <= days.len() as u32 {
+                    days[day as usize - 1].tsuika_count = count;
+                }
+            }
+        }
 
         let mut timecard = MonthlyTimecard {
             driver: driver.clone(),
