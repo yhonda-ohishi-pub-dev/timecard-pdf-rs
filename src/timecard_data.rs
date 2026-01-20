@@ -18,6 +18,7 @@ pub struct DayRecord {
     pub clock_in: Vec<String>,      // 出勤時刻（最大2回）
     pub clock_out: Vec<String>,     // 退勤時刻（最大2回）
     pub remarks: String,            // 備考（公休、有休等）
+    pub detail_st: String,          // 出張マーク（「出」）
     pub is_sunday: bool,            // 日曜日フラグ
     pub kosoku_minutes: Option<i32>, // 拘束時間（分）- 表示用（TC_DC + デジタコ合算）
     pub kosoku_tcdc: Option<i32>,   // TC_DC版拘束時間（分）- INSERT用
@@ -39,6 +40,7 @@ impl DayRecord {
             clock_in: Vec::new(),
             clock_out: Vec::new(),
             remarks: String::new(),
+            detail_st: String::new(),
             is_sunday,
             kosoku_minutes: None,
             kosoku_tcdc: None,

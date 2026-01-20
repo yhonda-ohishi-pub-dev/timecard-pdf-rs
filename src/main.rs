@@ -123,8 +123,10 @@ fn run_db_mode(args: &[String]) {
             let kosoku = day.kosoku_str();
 
             let sunday_mark = if day.is_sunday { "*" } else { " " };
+            // 備考 = remarks + detail_st（PHPと同じ連結表示）
+            let remarks = format!("{}{}", day.remarks, day.detail_st);
             println!("{}{:>2} {:>2} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {}",
-                sunday_mark, day.day, day.weekday, in1, out1, in2, out2, zangyo, kosoku, day.remarks);
+                sunday_mark, day.day, day.weekday, in1, out1, in2, out2, zangyo, kosoku, remarks);
         }
         println!();
     }

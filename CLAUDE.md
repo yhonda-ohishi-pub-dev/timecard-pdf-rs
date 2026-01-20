@@ -95,3 +95,6 @@ echo "0.4.0" > VERSION && git add VERSION && git commit -m "Release 0.4.0" && gi
 - .git/hooks/pre-commit: VERSION→Cargo.toml同期
 - .git/hooks/pre-push: タグ作成＆Dockerイメージビルド・push
 - GHCR: ghcr.io/yhonda-ohishi-pub-dev/timecard-pdf-rs
+
+## VPN接続
+本番DBにアクセスするにはVPN接続が必要。手順は `.claude/skills/vpn-connect.md` を参照。

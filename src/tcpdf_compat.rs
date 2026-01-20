@@ -472,12 +472,11 @@ impl TcpdfCompat {
                 let out2 = day.clock_out.get(1).map(|s| s.as_str()).unwrap_or("");
 
                 // 備考（PHPでは畜/引マークを備考に出力していない）
-                // 作業日報がある場合は「作」マークを追加（備考の内容に関係なく連結）
-                let remarks = if day.has_daily_report {
-                    format!("{}作", day.remarks)
-                } else {
-                    day.remarks.clone()
-                };
+                // remarks + detail_st + 作マークを連結（PHPと同じ）
+                let mut remarks = format!("{}{}", day.remarks, day.detail_st);
+                if day.has_daily_report {
+                    remarks.push_str("作");
+                }
 
                 let values = [
                     day.day.to_string(),

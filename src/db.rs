@@ -493,7 +493,7 @@ impl TimecardDb {
             }
         )?;
 
-        // 「出」マークを設定
+        // 「出」マークを設定（detail_stフィールドに設定）
         // split_lineから
         for (start_str, end_str) in split_lines {
             if let (Ok(start_date), Ok(end_date)) = (
@@ -506,8 +506,8 @@ impl TimecardDb {
                     while current <= end_date {
                         if current >= start_month_parsed && current < end_month_parsed {
                             let day = current.day() as usize;
-                            if day >= 1 && day <= days.len() && days[day - 1].remarks.is_empty() {
-                                days[day - 1].remarks = "出".to_string();
+                            if day >= 1 && day <= days.len() {
+                                days[day - 1].detail_st = "出".to_string();
                             }
                         }
                         current = current.succ_opt().unwrap();
@@ -536,8 +536,8 @@ impl TimecardDb {
                     while current <= end_date {
                         if current >= start_month_parsed && current < end_month_parsed {
                             let day = current.day() as usize;
-                            if day >= 1 && day <= days.len() && days[day - 1].remarks.is_empty() {
-                                days[day - 1].remarks = "出".to_string();
+                            if day >= 1 && day <= days.len() {
+                                days[day - 1].detail_st = "出".to_string();
                             }
                         }
                         current = current.succ_opt().unwrap();
@@ -1715,7 +1715,7 @@ impl TimecardDb {
             NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
         };
 
-        // 「出」マークを設定（split_lineから）
+        // 「出」マークを設定（detail_stフィールドに設定、split_lineから）
         if let Some(split_lines) = batch_data.split_lines.get(&driver.id) {
             for (start_str, end_str) in split_lines {
                 if let (Ok(start_date), Ok(end_date)) = (
@@ -1727,8 +1727,8 @@ impl TimecardDb {
                         while current <= end_date {
                             if current >= start_month_parsed && current < end_month_parsed {
                                 let day = current.day() as usize;
-                                if day >= 1 && day <= days.len() && days[day - 1].remarks.is_empty() {
-                                    days[day - 1].remarks = "出".to_string();
+                                if day >= 1 && day <= days.len() {
+                                    days[day - 1].detail_st = "出".to_string();
                                 }
                             }
                             current = current.succ_opt().unwrap();
@@ -1738,7 +1738,7 @@ impl TimecardDb {
             }
         }
 
-        // 「出」マーク（ryohi_rows直接）
+        // 「出」マーク（ryohi_rows直接、detail_stフィールドに設定）
         if let Some(ryohi_direct) = batch_data.ryohi_direct.get(&driver.id) {
             let ryohi_ids_with_split = batch_data.ryohi_ids_with_split.get(&driver.id);
             for (id, start_str, end_str, tekiyo, fl_show) in ryohi_direct {
@@ -1760,8 +1760,8 @@ impl TimecardDb {
                         while current <= end_date {
                             if current >= start_month_parsed && current < end_month_parsed {
                                 let day = current.day() as usize;
-                                if day >= 1 && day <= days.len() && days[day - 1].remarks.is_empty() {
-                                    days[day - 1].remarks = "出".to_string();
+                                if day >= 1 && day <= days.len() {
+                                    days[day - 1].detail_st = "出".to_string();
                                 }
                             }
                             current = current.succ_opt().unwrap();
