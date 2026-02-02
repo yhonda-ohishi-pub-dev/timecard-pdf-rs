@@ -337,6 +337,10 @@ impl TimecardDb {
 
                     // 出勤が少なければ出勤に、そうでなければ退勤に追加
                     if record.clock_in.len() <= record.clock_out.len() && record.clock_in.len() < 2 {
+                        // 退勤が既にある場合は出勤[1]に入れる（dstate state=30と同じロジック）
+                        if !record.clock_out.is_empty() && record.clock_in.is_empty() {
+                            record.clock_in.push(String::new()); // 出勤[0]は空
+                        }
                         record.clock_in.push(time_str);
                     } else if record.clock_out.len() < 2 {
                         record.clock_out.push(time_str);
@@ -1642,6 +1646,10 @@ impl TimecardDb {
                         let time_str = datetime.format("%H:%M").to_string();
                         let record = &mut days[day - 1];
                         if record.clock_in.len() <= record.clock_out.len() && record.clock_in.len() < 2 {
+                            // 退勤が既にある場合は出勤[1]に入れる（dstate state=30と同じロジック）
+                            if !record.clock_out.is_empty() && record.clock_in.is_empty() {
+                                record.clock_in.push(String::new()); // 出勤[0]は空
+                            }
                             record.clock_in.push(time_str);
                         } else if record.clock_out.len() < 2 {
                             record.clock_out.push(time_str);
