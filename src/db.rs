@@ -147,6 +147,38 @@ impl DbConfig {
     }
 }
 
+/// 祝日API (holidays-jp.github.io) から国民の祝日を取得
+/// 対象月の祝日の日番号をHashSetで返す。APIエラー時は空セットを返す。
+fn fetch_national_holidays(year: i32, month: u32) -> HashSet<u32> {
+    let url = format!("https://holidays-jp.github.io/api/v1/{}/date.json", year);
+    let month_prefix = format!("{}-{:02}-", year, month);
+
+    match ureq::get(&url).call() {
+        Ok(response) => {
+            match response.into_json::<HashMap<String, String>>() {
+                Ok(holidays_map) => {
+                    holidays_map.keys()
+                        .filter(|date_str| date_str.starts_with(&month_prefix))
+                        .filter_map(|date_str| {
+                            NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+                                .ok()
+                                .map(|d| d.day())
+                        })
+                        .collect()
+                }
+                Err(e) => {
+                    eprintln!("祝日API JSONパースエラー: {}", e);
+                    HashSet::new()
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("祝日API取得エラー: {}", e);
+            HashSet::new()
+        }
+    }
+}
+
 /// タイムカードデータベースアクセス
 pub struct TimecardDb {
     pool: Pool,
@@ -909,10 +941,46 @@ impl TimecardDb {
             summary,
         };
 
+        // 祝日フラグを設定
+        let holidays = self.get_all_holidays(year, month);
+        for day in &mut timecard.days {
+            if holidays.contains(&(day.day as u32)) {
+                day.is_holiday = true;
+            }
+        }
+
         // 集計を計算（基礎日数なし - 後でcalculate_summary_with_kisoを呼ぶ）
         timecard.calculate_summary();
 
         Ok(timecard)
+    }
+
+    /// 非法定休日を取得 (time_card_non_legal_holiday テーブル)
+    fn get_non_legal_holidays(&self, year: i32, month: u32) -> Result<HashSet<u32>> {
+        let mut conn = self.pool.get_conn()?;
+        let start_date = format!("{}-{:02}-01", year, month);
+        let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+        let next_month_start = format!("{}-{:02}-01", next_year, next_month);
+
+        let days: Vec<u32> = conn.query_map(
+            format!(
+                "SELECT DAY(p_date) FROM time_card_non_legal_holiday
+                 WHERE p_date >= '{}' AND p_date < '{}'",
+                start_date, next_month_start
+            ),
+            |day: u32| day
+        )?;
+
+        Ok(days.into_iter().collect())
+    }
+
+    /// 全休日（祝日API + 非法定休日DB）を取得
+    fn get_all_holidays(&self, year: i32, month: u32) -> HashSet<u32> {
+        let mut holidays = fetch_national_holidays(year, month);
+        if let Ok(non_legal) = self.get_non_legal_holidays(year, month) {
+            holidays.extend(non_legal);
+        }
+        holidays
     }
 
     /// ドライバーの入社前日数と退職後日数を計算
@@ -1019,6 +1087,16 @@ impl TimecardDb {
         for chunk in drivers.chunks(BATCH_SIZE) {
             let batch_timecards = self.get_monthly_timecards_batch(chunk, year, month, kiso_date)?;
             all_timecards.extend(batch_timecards);
+        }
+
+        // 祝日フラグを設定（全ドライバー共通）
+        let holidays = self.get_all_holidays(year, month);
+        for tc in &mut all_timecards {
+            for day in &mut tc.days {
+                if holidays.contains(&(day.day as u32)) {
+                    day.is_holiday = true;
+                }
+            }
         }
 
         Ok(all_timecards)

@@ -20,6 +20,7 @@ pub struct DayRecord {
     pub remarks: String,            // 備考（公休、有休等）
     pub detail_st: String,          // 出張マーク（「出」）
     pub is_sunday: bool,            // 日曜日フラグ
+    pub is_holiday: bool,           // 祝日・非法定休日フラグ
     pub kosoku_minutes: Option<i32>, // 拘束時間（分）- 表示用（TC_DC + デジタコ合算）
     pub kosoku_tcdc: Option<i32>,   // TC_DC版拘束時間（分）- INSERT用
     pub kosoku_digitacho: Option<i32>, // デジタコ版拘束時間（分）- INSERT用
@@ -42,6 +43,7 @@ impl DayRecord {
             remarks: String::new(),
             detail_st: String::new(),
             is_sunday,
+            is_holiday: false,
             kosoku_minutes: None,
             kosoku_tcdc: None,
             kosoku_digitacho: None,

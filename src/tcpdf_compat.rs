@@ -493,8 +493,8 @@ impl TcpdfCompat {
                 // 各セルを描画
                 let mut current_x = x;
                 for (col_idx, (value, width)) in values.iter().zip(widths.iter()).enumerate() {
-                    // 曜日列（col_idx=1）で日曜日の場合はグレー背景
-                    if col_idx == 1 && day.is_sunday {
+                    // 曜日列（col_idx=1）で日曜日・祝日の場合はグレー背景
+                    if col_idx == 1 && (day.is_sunday || day.is_holiday) {
                         self.draw_filled_rect_gray(current_x, y, *width, row_h);
                     }
 
@@ -750,10 +750,10 @@ impl TcpdfCompat {
             // ===== 曜日行 =====
             for (i, day) in timecard.days.iter().enumerate() {
                 let x = ind_x + i as f64 * cell_w;
-                let is_sunday = day.weekday == "日";
+                let is_holiday_or_sunday = day.weekday == "日" || day.is_holiday;
 
-                // 日曜日は背景をグレーに
-                if is_sunday {
+                // 日曜日・祝日は背景をグレーに
+                if is_holiday_or_sunday {
                     self.draw_filled_rect_gray(x, y, cell_w, 4.0);
                 }
 
